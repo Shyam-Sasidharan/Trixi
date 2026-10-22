@@ -1,114 +1,179 @@
+# TRIXI: Real-Time Multiplayer Card Game Backend
+
 <p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
+  <img src="https://img.shields.io/badge/Node.js-v20+-green.svg" alt="Node.js" />
+  <img src="https://img.shields.io/badge/NestJS-v12.0-red.svg" alt="NestJS" />
+  <img src="https://img.shields.io/badge/PostgreSQL-v16-blue.svg" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Prisma-v7.10-teal.svg" alt="Prisma" />
+  <img src="https://img.shields.io/badge/Redis-v7.0-critical.svg" alt="Redis" />
+  <img src="https://img.shields.io/badge/Socket.IO-v4.8-black.svg" alt="Socket.IO" />
+  <img src="https://img.shields.io/badge/Tests-62%20Passed-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/License-UNLICENSED-yellow.svg" alt="License" />
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+An enterprise-grade, high-concurrency real-time backend powering the Middle Eastern card game **Trix** (also known as Trex / تركس). The platform supports both **Solo** and **Partnership (Team)** modes across **Free Mercy** and **Crazy Complex** kingdoms.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Key Highlights
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- **Pure TypeScript Game Engine**: Completely decoupled domain layer in `src/game-engine/` with zero NestJS, database, or WebSocket dependencies. 100% deterministic rules covering all 5 contracts, doubling calculations, pre-deal call-offs, and 13-Diamond sweeps.
+- **Zero-Trust Anti-Cheat Serializer**: Server acts as the single source of truth; opponents' hidden cards are strictly stripped from all network payloads.
+- **Real-Time Multiplayer Networking**: Built on Socket.IO over NGINX with 300s keep-alive buffers, turn timers (10/20/30s), doubling timers (8s), and automated bot delegation on disconnect.
+- **Matchmaking & Caching**: Redis-backed atomic 4-player matchmaking queue with in-memory fallback, and 3-minute cached global leaderboards.
+- **Production Containerization**: Multi-stage Dockerfile (<180MB) and Docker Compose stack for App, PostgreSQL 16, Redis 7, and NGINX reverse proxy.
+- **Comprehensive Test Coverage**: 62 automated unit and integration tests passing in Vitest, plus automated headless 4-bot WebSocket stress simulator.
 
-## Project setup
+---
 
-```bash
-$ npm install
+## Architecture Overview
+
+```mermaid
+graph TD
+    Client[Web / Mobile Clients] <-->|HTTPS REST| NGINX[NGINX Reverse Proxy :443]
+    Client <-->|WSS WebSockets| NGINX
+
+    NGINX -->|HTTP Proxy| NestApp[NestJS Backend :3000]
+    NGINX -->|WS Upgrade| NestApp
+
+    subgraph "Application Layer (NestJS)"
+        Auth[Auth & JWT Module]
+        Users[Users & Stats Module]
+        Matchmaking[Matchmaking Queue]
+        Rooms[Game Room & Timer Service]
+        Gateway[Game Gateway WebSocket]
+        Health[Health & Observability]
+        Leaderboard[Dynamic Leaderboard]
+    end
+
+    NestApp --> Gateway
+    NestApp --> Auth
+    NestApp --> Users
+    NestApp --> Matchmaking
+    NestApp --> Rooms
+    NestApp --> Health
+    NestApp --> Leaderboard
+
+    subgraph "Domain Layer (Pure TypeScript)"
+        TrixEngine[TrixEngine Orchestrator]
+        Deck[Deck & Shuffle Engine]
+        CallOffs[Pre-Deal Call-Off Validator]
+        Doubling[Doubling Resolution Engine]
+        TrickEngine[Trick Engine - Negative Contracts]
+        TrixContract[Trix Ladder Shedding Contract]
+    end
+
+    Rooms --> TrixEngine
+    TrixEngine --> Deck
+    TrixEngine --> CallOffs
+    TrixEngine --> Doubling
+    TrixEngine --> TrickEngine
+    TrixEngine --> TrixContract
+
+    NestApp --> Redis[("Redis :6379<br/>(Sessions & Queues)")]
+    NestApp --> Prisma[Prisma ORM Service]
+    Prisma --> Postgres[("PostgreSQL :5432<br/>(trix_db)")]
 ```
 
-## Compile and run the project
+---
 
+## Documentation Quick Links
+
+Complete technical documentation is available in the [`docs/`](./docs) directory:
+
+- [**Full Backend Master Documentation**](./docs/FULL_BACKEND_DOCUMENTATION.md): Complete architecture, modules, models, and specifications.
+- [**REST API & WebSocket Events Reference**](./docs/API_AND_EVENTS_REFERENCE.md): Full catalog of HTTP endpoints and Socket.IO payloads.
+- [**Production Deployment Runbook**](./docs/DEPLOYMENT_RUNBOOK.md): Ubuntu VPS provisioning, file descriptor limits, Let's Encrypt SSL, and Docker Compose setup.
+- [**Trix Mathematical Rules & Engine Specification**](./docs/TRIX_GAME_RULES_SPEC.md): 4 Kingdoms, 5 contracts, Free Mercy vs Crazy Complex, Solo vs Team doubling, and sweep resets.
+- [**System Architecture & Database ERD**](./docs/SYSTEM_ARCHITECTURE_AND_DATABASE.md): PostgreSQL schema models, relationships, and indexing.
+
+---
+
+## Quickstart Guide
+
+### 1. Prerequisites
+- Node.js v20+ LTS
+- PostgreSQL v16
+- Redis v7 (optional, in-memory fallback enabled)
+
+### 2. Installation
 ```bash
-# development
-$ npm run start
+# Clone the repository
+git clone https://github.com/Shyam-Sasidharan/Trixi.git
+cd Trixi
 
-# watch mode
-$ npm run start:dev
+# Install dependencies
+npm install
 
-# production mode
-$ npm run start:prod
+# Copy environment variables
+cp .env.example .env
 ```
 
-## Run tests
-
+### 3. Database Setup
 ```bash
-# unit tests
-$ npm run test
+# Generate Prisma Client
+npx prisma generate
 
-# e2e tests
-$ npm run test:e2e
+# Push database schema to PostgreSQL
+npx prisma db push
 
-# test coverage
-$ npm run test:cov
+# (Optional) Open Prisma Studio visual GUI
+npx prisma studio
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
+### 4. Running the Application
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# Development (watch mode)
+npm run start:dev
+
+# Production build
+npm run build
+npm run start:prod
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### 5. Running Automated Tests & Stress Simulator
+```bash
+# Run all 62 unit and integration tests
+npm test
 
-## Observability
+# Run headless 4-bot WebSocket load & anti-cheat simulator
+npm run test:stress
+```
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+---
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+## Production Deployment with Docker Compose
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Deploy the complete stack (App, PostgreSQL, Redis, and NGINX with SSL):
 
-## Resources
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Check system health:
+```bash
+curl http://localhost:3000/health
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+Expected response:
+```json
+{
+  "status": "ok",
+  "postgres": "connected",
+  "redis": "connected",
+  "activeRooms": 0,
+  "uptimeSeconds": 120,
+  "memory": {
+    "heapUsedMB": "42.10",
+    "heapTotalMB": "48.50",
+    "rssMB": "94.20"
+  },
+  "timestamp": "2026-10-22T12:00:00.000Z"
+}
+```
 
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+---
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+This project is proprietary and confidential.
