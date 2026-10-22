@@ -1,0 +1,140 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AppTheme {
+  DARK
+  LIGHT
+}
+
+enum CardTheme {
+  CLASSIC
+  MODERN
+  LUXURY
+}
+
+enum TableTheme {
+  GREEN_FELT
+  ROYAL_BLUE
+  BURGUNDY
+}
+
+enum GameMode {
+  SOLO
+  TEAM
+}
+
+enum KingdomType {
+  FREE_MERCY
+  CRAZY_COMPLEX
+}
+
+enum SubscriptionPlan {
+  MONTHLY
+  ANNUAL
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+model User {
+  id            String              @id @default(uuid()) @db.Uuid
+  email         String              @unique
+  passwordHash  String?
+  displayName   String
+  avatarUrl     String?
+  level         Int                 @default(1)
+  xp            Int                 @default(0)
+  coins         Int                 @default(1000)
+  isVip         Boolean             @default(false)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  stats         UserStats?
+  settings      UserSettings?
+  matches       MatchParticipant[]
+  subscriptions UserSubscription[]
+  refreshTokens RefreshToken[]
+}
+
+model UserStats {
+  id                  String   @id @default(uuid()) @db.Uuid
+  userId              String   @unique @db.Uuid
+  gamesPlayed         Int      @default(0)
+  wins                Int      @default(0)
+  losses              Int      @default(0)
+  soloWins            Int      @default(0)
+  teamWins            Int      @default(0)
+  totalQueensCaptured Int      @default(0)
+  totalHeartsCaptured Int      @default(0)
+  trixFirstPlaceCount Int      @default(0)
+
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserSettings {
+  id               String     @id @default(uuid()) @db.Uuid
+  userId           String     @unique @db.Uuid
+  appTheme         AppTheme   @default(DARK)
+  cardTheme        CardTheme  @default(CLASSIC)
+  tableTheme       TableTheme @default(GREEN_FELT)
+  soundEnabled     Boolean    @default(true)
+  musicEnabled     Boolean    @default(true)
+  vibrationEnabled Boolean    @default(true)
+  chatEnabled      Boolean    @default(true)
+
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MatchHistory {
+  id           String             @id @default(uuid()) @db.Uuid
+  roomId       String
+  gameMode     GameMode
+  kingdomType  KingdomType
+  winningScore Int
+  playerScores Json
+  createdAt    DateTime           @default(now())
+
+  participants MatchParticipant[]
+}
+
+model MatchParticipant {
+  id         String       @id @default(uuid()) @db.Uuid
+  matchId    String       @db.Uuid
+  userId     String       @db.Uuid
+  seatIndex  Int
+  finalScore Int
+  isWinner   Boolean      @default(false)
+
+  match      MatchHistory @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  user       User         @relation(fields: [userId], references: [id])
+}
+
+model UserSubscription {
+  id            String             @id @default(uuid()) @db.Uuid
+  userId        String             @db.Uuid
+  planType      SubscriptionPlan
+  status        SubscriptionStatus
+  purchaseToken String
+  expiresAt     DateTime
+  createdAt     DateTime           @default(now())
+
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  tokenHash  String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
