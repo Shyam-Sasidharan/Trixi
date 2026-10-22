@@ -227,6 +227,13 @@ export class GameRoomService {
     return null;
   }
 
+  /**
+   * Returns current count of active game rooms.
+   */
+  public getActiveRoomsCount(): number {
+    return this.rooms.size;
+  }
+
   public findRoomBySocketId(socketId: string): { room: ActiveGameRoom; seat: number } | null {
     const mapping = this.socketToRoom.get(socketId);
     if (!mapping) return null;

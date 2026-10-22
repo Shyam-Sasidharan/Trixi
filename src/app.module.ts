@@ -8,6 +8,7 @@ import { UsersModule } from './users/users.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
 import { LeaderboardModule } from './leaderboard/leaderboard.module.js';
+import { HealthModule } from './health/health.module.js';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { LeaderboardModule } from './leaderboard/leaderboard.module.js';
     AuthModule,
     UsersModule,
     LeaderboardModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [AppService],
