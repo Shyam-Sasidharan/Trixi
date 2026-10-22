@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
+import { LeaderboardModule } from './leaderboard/leaderboard.module.js';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { RedisModule } from './common/redis/redis.module.js';
     MatchmakingModule,
     AuthModule,
     UsersModule,
+    LeaderboardModule,
   ],
   controllers: [AppController],
   providers: [AppService],
