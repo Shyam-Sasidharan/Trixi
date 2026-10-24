@@ -14,10 +14,34 @@ This document provides the complete API reference for all REST HTTP endpoints an
 
 ### 1.1 Authentication & Session (`/auth`)
 
+Supports dual-identifier authentication: players can register and log in using either an **Email Address** OR a **Mobile Phone Number** (or a single unified `identifier` matching the Flutter/mobile UI's "Email or phone" input).
+
 #### `POST /auth/register`
-Creates a new player account with default `UserSettings` and `UserStats` inside an atomic transaction.
+Creates a new player account with default `UserSettings` and `UserStats` inside an atomic transaction. At least one identifier (`identifier`, `email`, or `phoneNumber`) must be provided.
+
 - **Headers**: `Content-Type: application/json`
-- **Body**:
+- **Request Body Options**:
+
+  *Option A: Unified Identifier (Recommended for Flutter/Mobile UI)*
+  ```json
+  {
+    "identifier": "+966501234567",
+    "password": "Password123!",
+    "displayName": "TrixMaster"
+  }
+  ```
+  *(or pass an email into `identifier`: `{"identifier": "player1@trix.com", "password": "..."}`)*
+
+  *Option B: Explicit Mobile Phone Number*
+  ```json
+  {
+    "phoneNumber": "+966 50 123 4567",
+    "password": "Password123!"
+  }
+  ```
+  *(Note: Phone numbers are automatically normalized; spaces, dashes, and parentheses are stripped, and leading `00` converts to `+`. If `displayName` is omitted, it auto-defaults to `Player_<last4Digits>` e.g., `Player_4567`)*
+
+  *Option C: Legacy Email Registration (100% Backward Compatible)*
   ```json
   {
     "email": "player1@trix.com",
@@ -26,38 +50,68 @@ Creates a new player account with default `UserSettings` and `UserStats` inside 
     "avatarUrl": "https://cdn.trixi.com/avatars/1.png"
   }
   ```
+
 - **Response (201 Created)**:
   ```json
   {
     "user": {
       "id": "e6f47738-f1c5-4ad9-bf95-5cb97dca0e5b",
       "email": "player1@trix.com",
+      "phoneNumber": null,
+      "phoneVerified": false,
+      "emailVerified": false,
       "displayName": "TrixMaster",
       "avatarUrl": "https://cdn.trixi.com/avatars/1.png",
       "level": 1,
       "xp": 0,
       "coins": 1000,
-      "isVip": false
+      "isVip": false,
+      "createdAt": "2026-10-24T17:40:00.000Z",
+      "updatedAt": "2026-10-24T17:40:00.000Z"
     },
     "tokens": {
       "accessToken": "eyJhbGciOiJIUzI1Ni...",
-      "refreshToken": "eyJhbGciOiJIUzI1Ni..."
+      "refreshToken": "eyJhbGciOiJIUzI1Ni...",
+      "expiresIn": 3600
     }
   }
   ```
 
 #### `POST /auth/login`
-Validates credentials and returns JWT token pair.
-- **Body**: `{ "email": "player1@trix.com", "password": "Password123!" }`
-- **Response (200 OK)**: Returns user profile and token pair.
+Validates player credentials using either their Email OR Mobile Phone Number.
+- **Request Body Options**:
+  *Option A: Unified Identifier (Mobile App Input)*
+  ```json
+  {
+    "identifier": "+966501234567",
+    "password": "Password123!"
+  }
+  ```
+  *Option B: Legacy Format*
+  ```json
+  {
+    "email": "player1@trix.com",
+    "password": "Password123!"
+  }
+  ```
+- **Response (200 OK)**: Returns the sanitized user profile and token pair.
 
 #### `POST /auth/refresh`
-Rotates refresh tokens and issues fresh access token.
+Rotates refresh tokens, deletes the used token record from the database, and issues fresh tokens. Refreshed token claims automatically include `phoneNumber` and `displayName`.
 - **Body**: `{ "refreshToken": "eyJhbGciOiJIUzI1Ni..." }`
-- **Response (200 OK)**: `{ "accessToken": "...", "refreshToken": "..." }`
+- **Response (200 OK)**:
+  ```json
+  {
+    "tokens": {
+      "accessToken": "eyJhbGciOiJIUzI1Ni...",
+      "refreshToken": "eyJhbGciOiJIUzI1Ni...",
+      "expiresIn": 3600
+    }
+  }
+  ```
 
 #### `POST /auth/logout`
-Revokes active session from Redis and PostgreSQL.
+Revokes active session: blacklists the access token in Redis (until its JWT expiration) and purges refresh tokens from PostgreSQL.
 - **Headers**: `Authorization: Bearer <accessToken>`
 - **Response (200 OK)**: `{ "message": "Successfully logged out" }`
 
@@ -73,6 +127,9 @@ Retrieves authenticated player profile, stats, and personalized settings.
   {
     "id": "e6f47738-f1c5-4ad9-bf95-5cb97dca0e5b",
     "email": "player1@trix.com",
+    "phoneNumber": "+966501234567",
+    "phoneVerified": false,
+    "emailVerified": true,
     "displayName": "TrixMaster",
     "avatarUrl": "https://cdn.trixi.com/avatars/1.png",
     "level": 3,
