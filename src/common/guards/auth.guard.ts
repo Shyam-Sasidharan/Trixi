@@ -9,7 +9,9 @@ import { RedisService } from '../redis/redis.service.js';
 
 export interface JwtPayload {
   sub: string;
-  email: string;
+  email?: string;
+  phoneNumber?: string;
+  displayName?: string;
   iat?: number;
   exp?: number;
 }

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   InternalServerErrorException,
@@ -27,15 +28,88 @@ export class AuthService {
     private readonly redisService: RedisService,
   ) {}
 
+  /**
+   * Normalizes mobile phone numbers by removing spaces, dashes, parentheses.
+   * Converts leading '00' to '+'. Enforces standard numeric format.
+   */
+  public normalizePhoneNumber(phone: string): string {
+    const trimmed = phone.trim();
+    // Replace leading 00 with +
+    let cleaned = trimmed.replace(/^00/, '+');
+    // Remove all whitespace, dashes, parentheses, dots
+    cleaned = cleaned.replace(/[\s\-\(\)\.]/g, '');
+
+    // Validate: optional leading +, followed by 7 to 15 digits
+    const phoneRegex = /^\+?[0-9]{7,15}$/;
+    if (!phoneRegex.test(cleaned)) {
+      throw new BadRequestException('Invalid mobile phone number format');
+    }
+
+    return cleaned;
+  }
+
+  /**
+   * Registers a new player using either Email OR Phone Number (or both).
+   */
   async register(dto: RegisterDto) {
-    const normalizedEmail = dto.email.trim().toLowerCase();
+    let rawEmail: string | undefined = dto.email;
+    let rawPhone: string | undefined = dto.phoneNumber;
 
-    const existingUser = await this.prisma.user.findUnique({
-      where: { email: normalizedEmail },
-    });
+    // Support unified "identifier" input from Flutter/mobile forms
+    if (dto.identifier && dto.identifier.trim()) {
+      const idVal = dto.identifier.trim();
+      if (idVal.includes('@')) {
+        rawEmail = rawEmail || idVal;
+      } else {
+        rawPhone = rawPhone || idVal;
+      }
+    }
 
-    if (existingUser) {
-      throw new ConflictException('A user with this email address already exists');
+    if (!rawEmail && !rawPhone) {
+      throw new BadRequestException('Either an email address or mobile phone number must be provided');
+    }
+
+    let normalizedEmail: string | undefined;
+    if (rawEmail && rawEmail.trim()) {
+      normalizedEmail = rawEmail.trim().toLowerCase();
+      // Basic email structure check
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(normalizedEmail)) {
+        throw new BadRequestException('Invalid email address format');
+      }
+
+      const existingByEmail = await this.prisma.user.findUnique({
+        where: { email: normalizedEmail },
+      });
+
+      if (existingByEmail) {
+        throw new ConflictException('A user with this email address already exists');
+      }
+    }
+
+    let normalizedPhone: string | undefined;
+    if (rawPhone && rawPhone.trim()) {
+      normalizedPhone = this.normalizePhoneNumber(rawPhone);
+
+      const existingByPhone = await this.prisma.user.findUnique({
+        where: { phoneNumber: normalizedPhone },
+      });
+
+      if (existingByPhone) {
+        throw new ConflictException('A user with this mobile phone number already exists');
+      }
+    }
+
+    // Determine displayName
+    let displayName = dto.displayName?.trim();
+    if (!displayName) {
+      if (normalizedEmail) {
+        displayName = normalizedEmail.split('@')[0];
+      } else if (normalizedPhone) {
+        displayName = `Player_${normalizedPhone.slice(-4)}`;
+      } else {
+        displayName = 'Player';
+      }
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -45,9 +119,10 @@ export class AuthService {
       const user = await this.prisma.$transaction(async (tx) => {
         const newUser = await tx.user.create({
           data: {
-            email: normalizedEmail,
+            email: normalizedEmail || null,
+            phoneNumber: normalizedPhone || null,
             passwordHash,
-            displayName: dto.displayName.trim(),
+            displayName,
             avatarUrl: dto.avatarUrl,
             settings: {
               create: {},
@@ -65,7 +140,12 @@ export class AuthService {
         return newUser;
       });
 
-      const tokens = await this.generateTokens(user.id, user.email);
+      const tokens = await this.generateTokens(
+        user.id,
+        user.email,
+        user.phoneNumber,
+        user.displayName,
+      );
       await this.saveRefreshToken(user.id, tokens.refreshToken);
 
       return {
@@ -73,33 +153,75 @@ export class AuthService {
         tokens,
       };
     } catch (err: unknown) {
+      if (err instanceof ConflictException || err instanceof BadRequestException) {
+        throw err;
+      }
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Failed to register user: ${message}`);
       throw new InternalServerErrorException('Failed to complete user registration');
     }
   }
 
+  /**
+   * Logs in a player using unified identifier (Email OR Phone Number) and password.
+   */
   async login(dto: LoginDto) {
-    const normalizedEmail = dto.email.trim().toLowerCase();
+    const rawIdentifier = (dto.identifier || dto.email || dto.phoneNumber || '').trim();
 
-    const user = await this.prisma.user.findUnique({
-      where: { email: normalizedEmail },
-      include: {
-        settings: true,
-        stats: true,
-      },
-    });
+    if (!rawIdentifier) {
+      throw new BadRequestException('Email or phone number is required');
+    }
+
+    let user;
+
+    if (rawIdentifier.includes('@')) {
+      // Identifier is an email
+      const normalizedEmail = rawIdentifier.toLowerCase();
+      user = await this.prisma.user.findUnique({
+        where: { email: normalizedEmail },
+        include: {
+          settings: true,
+          stats: true,
+        },
+      });
+    } else {
+      // Identifier is a phone number
+      let normalizedPhone = rawIdentifier;
+      try {
+        normalizedPhone = this.normalizePhoneNumber(rawIdentifier);
+      } catch {
+        // Fallback to searching raw identifier if non-standard
+      }
+
+      user = await this.prisma.user.findFirst({
+        where: {
+          OR: [
+            { phoneNumber: normalizedPhone },
+            { phoneNumber: rawIdentifier },
+          ],
+        },
+        include: {
+          settings: true,
+          stats: true,
+        },
+      });
+    }
 
     if (!user || !user.passwordHash) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Invalid email, phone number, or password');
     }
 
     const isPasswordValid = await bcrypt.compare(dto.password, user.passwordHash);
     if (!isPasswordValid) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Invalid email, phone number, or password');
     }
 
-    const tokens = await this.generateTokens(user.id, user.email);
+    const tokens = await this.generateTokens(
+      user.id,
+      user.email,
+      user.phoneNumber,
+      user.displayName,
+    );
     await this.saveRefreshToken(user.id, tokens.refreshToken);
 
     return {
@@ -151,7 +273,12 @@ export class AuthService {
       where: { id: matchedTokenRecord.id },
     });
 
-    const newTokens = await this.generateTokens(user.id, user.email);
+    const newTokens = await this.generateTokens(
+      user.id,
+      user.email,
+      user.phoneNumber,
+      user.displayName,
+    );
     await this.saveRefreshToken(user.id, newTokens.refreshToken);
 
     return {
@@ -183,8 +310,18 @@ export class AuthService {
     return { message: 'Successfully logged out' };
   }
 
-  private async generateTokens(userId: string, email: string) {
-    const payload: JwtPayload = { sub: userId, email };
+  private async generateTokens(
+    userId: string,
+    email?: string | null,
+    phoneNumber?: string | null,
+    displayName?: string,
+  ) {
+    const payload: JwtPayload = {
+      sub: userId,
+      email: email || undefined,
+      phoneNumber: phoneNumber || undefined,
+      displayName,
+    };
 
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {

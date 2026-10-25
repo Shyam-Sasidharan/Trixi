@@ -62,8 +62,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         const payload = await this.jwtService.verifyAsync(token, { secret });
         client.data.user = {
           id: payload.sub,
-          email: payload.email,
-          displayName: payload.displayName || payload.email.split('@')[0],
+          email: payload.email || `${payload.phoneNumber || payload.sub}@trix.local`,
+          displayName:
+            payload.displayName ||
+            (payload.email ? payload.email.split('@')[0] : payload.phoneNumber) ||
+            'Player',
           avatarUrl: payload.avatarUrl,
         } as SocketUser;
       } else {
