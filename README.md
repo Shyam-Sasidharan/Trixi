@@ -107,6 +107,10 @@ npm install
 
 # Copy environment variables
 cp .env.example .env
+
+# Edit .env: set DATABASE_URL to your local PostgreSQL user/password/port.
+# URL-encode special characters in the password (e.g. "@" -> "%40").
+# Replace JWT_SECRET / JWT_REFRESH_SECRET with your own random values.
 ```
 
 ### 3. Database Setup
