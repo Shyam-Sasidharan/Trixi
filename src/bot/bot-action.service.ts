@@ -1,6 +1,6 @@
-import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { GameGateway } from '../game-room/game.gateway.js';
-import { GameRoomService, ActiveGameRoom } from '../game-room/services/game-room.service.js';
+import { Injectable, Logger } from '@nestjs/common';
+import type { GameGateway } from '../game-room/game.gateway.js';
+import type { ActiveGameRoom } from '../game-room/services/game-room.service.js';
 import { BotBrainService } from './bot-brain.service.js';
 import { ALL_CONTRACTS, ContractType } from '../game-engine/types/contract.types.js';
 import { TrixContract } from '../game-engine/contracts/trix.contract.js';
@@ -13,16 +13,7 @@ export class BotActionService {
   private pendingActionTimers: Map<string, NodeJS.Timeout[]> = new Map();
   private testMode: boolean = false;
 
-  constructor(
-    private readonly botBrainService: BotBrainService,
-    @Inject(forwardRef(() => GameRoomService))
-    private readonly gameRoomService: GameRoomService,
-    @Optional()
-    @Inject(forwardRef(() => GameGateway))
-    gateway?: GameGateway,
-  ) {
-    this.gateway = gateway;
-  }
+  constructor(private readonly botBrainService: BotBrainService) {}
 
   public setGateway(gateway: GameGateway): void {
     this.gateway = gateway;

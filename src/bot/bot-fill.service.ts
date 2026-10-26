@@ -1,6 +1,6 @@
-import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
 import { GameRoomService, ActiveGameRoom } from '../game-room/services/game-room.service.js';
-import { GameGateway } from '../game-room/game.gateway.js';
+import type { GameGateway } from '../game-room/game.gateway.js';
 import { BotPersona, getRandomBotPersonas } from './bot-persona.data.js';
 
 export interface BackfillOptions {
@@ -17,12 +17,18 @@ export class BotFillService {
 
   constructor(
     @Inject(forwardRef(() => GameRoomService))
-    private readonly gameRoomService: any,
-    @Optional()
-    @Inject(forwardRef(() => GameGateway))
-    gateway?: any,
+    private readonly gameRoomService: GameRoomService,
   ) {
-    this.gateway = gateway;
+    if (this.gameRoomService && typeof this.gameRoomService.onRoomCreated === 'function') {
+      this.gameRoomService.onRoomCreated((room: ActiveGameRoom) => {
+        if (!room.isPrivate) {
+          this.scheduleBackfill(room);
+        }
+      });
+      this.gameRoomService.onRoomDestroyed((roomId: string) => {
+        this.cancelBackfill(roomId);
+      });
+    }
   }
 
   public setGateway(gateway: GameGateway): void {

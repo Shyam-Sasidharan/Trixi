@@ -1,12 +1,9 @@
 import {
   BadRequestException,
   ConflictException,
-  forwardRef,
-  Inject,
   Injectable,
   Logger,
   NotFoundException,
-  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -20,7 +17,6 @@ import {
 } from '../../game-engine/types/contract.types.js';
 import { TrickEngine } from '../../game-engine/trick-engine.js';
 import { TrixContract } from '../../game-engine/contracts/trix.contract.js';
-import { BotFillService } from '../../bot/bot-fill.service.js';
 
 export interface ActivePlayer {
   seat: number;
@@ -71,13 +67,18 @@ export class GameRoomService {
   private roomCodeToId: Map<string, string> = new Map(); // Keyed by uppercase roomCode
   private socketToRoom: Map<string, { roomId: string; seat: number }> = new Map();
   private userToRoom: Map<string, string> = new Map();
+  private onRoomCreatedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
+  private onRoomDestroyedCallbacks: ((roomId: string) => void)[] = [];
 
-  constructor(
-    private readonly prisma: PrismaService,
-    @Optional()
-    @Inject(forwardRef(() => BotFillService))
-    private readonly botFillService?: BotFillService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  public onRoomCreated(cb: (room: ActiveGameRoom) => void): void {
+    this.onRoomCreatedCallbacks.push(cb);
+  }
+
+  public onRoomDestroyed(cb: (roomId: string) => void): void {
+    this.onRoomDestroyedCallbacks.push(cb);
+  }
 
   /**
    * Generates a unique 6-character alphanumeric room code (e.g., 'TRX9A2').
@@ -160,8 +161,12 @@ export class GameRoomService {
     this.socketToRoom.set(socketId, { roomId, seat: 0 });
     this.userToRoom.set(hostUser.id, roomId);
 
-    if (this.botFillService && !room.isPrivate) {
-      this.botFillService.scheduleBackfill(room);
+    for (const cb of this.onRoomCreatedCallbacks) {
+      try {
+        cb(room);
+      } catch (err: any) {
+        this.logger.warn(`Error in onRoomCreated callback: ${err.message}`);
+      }
     }
 
     this.logger.log(`Room created: ${room.name} [Code: ${roomCode}, ID: ${roomId}] by User: ${hostUser.id}`);
@@ -382,8 +387,12 @@ export class GameRoomService {
    * Destroys an active room and cleans up lookup maps.
    */
   public destroyRoom(roomId: string): void {
-    if (this.botFillService) {
-      this.botFillService.cancelBackfill(roomId);
+    for (const cb of this.onRoomDestroyedCallbacks) {
+      try {
+        cb(roomId);
+      } catch (err: any) {
+        this.logger.warn(`Error in onRoomDestroyed callback: ${err.message}`);
+      }
     }
     const room = this.rooms.get(roomId);
     if (room) {
