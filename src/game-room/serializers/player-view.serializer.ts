@@ -19,6 +19,9 @@ export interface OpponentView {
   isBot?: boolean;
   displayName?: string;
   avatarUrl?: string;
+  level?: number;
+  coins?: number;
+  stats?: any;
 }
 
 export interface PlayerSeatInfo {
@@ -29,6 +32,9 @@ export interface PlayerSeatInfo {
   avatarUrl?: string;
   isConnected: boolean;
   isBot?: boolean;
+  level?: number;
+  coins?: number;
+  stats?: any;
 }
 
 export interface SanitizedPlayerGameState {
@@ -92,9 +98,12 @@ export class PlayerViewSerializer {
         remainingCardCount: matchState.hands[s]?.length ?? 0,
         isConnected: seatInfo?.isConnected ?? true,
         isDoublingAnnounced: hasDoubled,
-        isBot: seatInfo?.isBot ?? false,
+        isBot: false, // Disguised! Flutter client NEVER receives isBot: true
         displayName: seatInfo?.displayName,
         avatarUrl: seatInfo?.avatarUrl,
+        level: seatInfo?.level,
+        coins: seatInfo?.coins,
+        stats: seatInfo?.stats,
       });
     }
 

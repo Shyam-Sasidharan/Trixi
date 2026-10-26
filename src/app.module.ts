@@ -9,12 +9,14 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { RedisModule } from './common/redis/redis.module.js';
 import { LeaderboardModule } from './leaderboard/leaderboard.module.js';
 import { HealthModule } from './health/health.module.js';
+import { BotModule } from './bot/bot.module.js';
 
 @Module({
   imports: [
     PrismaModule,
     RedisModule,
     GameRoomModule,
+    BotModule,
     MatchmakingModule,
     AuthModule,
     UsersModule,

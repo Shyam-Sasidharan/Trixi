@@ -275,9 +275,42 @@ Emitted to individual player socket channels. Contains strictly recipient's hand
     { "id": "card-2", "suit": "DIAMONDS", "rank": "Q", "power": 12 }
   ],
   "opponents": [
-    { "seat": 1, "remainingCardCount": 13, "isConnected": true, "isDoublingAnnounced": false },
-    { "seat": 2, "remainingCardCount": 13, "isConnected": true, "isDoublingAnnounced": false },
-    { "seat": 3, "remainingCardCount": 13, "isConnected": true, "isDoublingAnnounced": false }
+    {
+      "seat": 1,
+      "remainingCardCount": 13,
+      "isConnected": true,
+      "isDoublingAnnounced": false,
+      "isBot": false,
+      "displayName": "Tariq Al-Mansoor",
+      "avatarUrl": "https://cdn.trixi.com/avatars/avatar_01.png",
+      "level": 18,
+      "coins": 8450,
+      "stats": { "gamesPlayed": 240, "wins": 144, "losses": 96, "soloWins": 86, "teamWins": 58, "winRate": 60.0 }
+    },
+    {
+      "seat": 2,
+      "remainingCardCount": 13,
+      "isConnected": true,
+      "isDoublingAnnounced": false,
+      "isBot": false,
+      "displayName": "Zaid Qasim",
+      "avatarUrl": "https://cdn.trixi.com/avatars/avatar_02.png",
+      "level": 12,
+      "coins": 4320,
+      "stats": { "gamesPlayed": 110, "wins": 58, "losses": 52, "soloWins": 32, "teamWins": 26, "winRate": 52.7 }
+    },
+    {
+      "seat": 3,
+      "remainingCardCount": 13,
+      "isConnected": true,
+      "isDoublingAnnounced": false,
+      "isBot": false,
+      "displayName": "Layla Al-Hashimi",
+      "avatarUrl": "https://cdn.trixi.com/avatars/avatar_03.png",
+      "level": 21,
+      "coins": 13800,
+      "stats": { "gamesPlayed": 360, "wins": 220, "losses": 140, "soloWins": 130, "teamWins": 90, "winRate": 61.1 }
+    }
   ],
   "doubledCardsOnTable": [],
   "currentTrick": [],
@@ -289,6 +322,40 @@ Emitted to individual player socket channels. Contains strictly recipient's hand
   "lastTrickWinner": null,
   "isDoublingPhase": false,
   "canDoubleCards": []
+}
+```
+
+#### `player_joined`
+Broadcasted to the room channel when a new player or disguised bot joins an open seat:
+```json
+{
+  "roomId": "f7206404-f961-46ca-9909-4e6f3f41da6f",
+  "seat": 1,
+  "user": {
+    "id": "b0700001-0001-4000-8000-000000000001",
+    "displayName": "Tariq Al-Mansoor",
+    "avatarUrl": "https://cdn.trixi.com/avatars/avatar_01.png",
+    "level": 18,
+    "coins": 8450,
+    "stats": {
+      "gamesPlayed": 240,
+      "wins": 144,
+      "losses": 96,
+      "soloWins": 86,
+      "teamWins": 58,
+      "winRate": 60.0
+    }
+  }
+}
+```
+
+#### `match_started`
+Broadcasted when all 4 seats are occupied and the match begins:
+```json
+{
+  "roomId": "f7206404-f961-46ca-9909-4e6f3f41da6f",
+  "gameMode": "SOLO",
+  "kingdomType": "FREE_MERCY"
 }
 ```
 
@@ -350,6 +417,17 @@ Broadcasted if a player's turn timer times out or a disconnected bot makes a mov
   "seat": 2,
   "card": { "suit": "CLUBS", "rank": "4", "power": 4 },
   "phase": "TRICK_PLAY"
+}
+```
+
+#### `one_card_announcement`
+Broadcasted in `TRIX_PLAY` when a player's or bot's remaining hand count drops to exactly 1:
+```json
+{
+  "roomId": "f7206404-f961-46ca-9909-4e6f3f41da6f",
+  "seat": 2,
+  "displayName": "Zaid Qasim",
+  "remainingCards": 1
 }
 ```
 

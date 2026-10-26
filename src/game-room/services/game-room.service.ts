@@ -1,9 +1,12 @@
 import {
   BadRequestException,
   ConflictException,
+  forwardRef,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -17,6 +20,7 @@ import {
 } from '../../game-engine/types/contract.types.js';
 import { TrickEngine } from '../../game-engine/trick-engine.js';
 import { TrixContract } from '../../game-engine/contracts/trix.contract.js';
+import { BotFillService } from '../../bot/bot-fill.service.js';
 
 export interface ActivePlayer {
   seat: number;
@@ -24,6 +28,10 @@ export interface ActivePlayer {
   socketId: string;
   displayName: string;
   avatarUrl?: string;
+  level?: number;
+  xp?: number;
+  coins?: number;
+  stats?: any;
   isConnected: boolean;
   isBot: boolean;
   disconnectTimer?: NodeJS.Timeout;
@@ -64,7 +72,12 @@ export class GameRoomService {
   private socketToRoom: Map<string, { roomId: string; seat: number }> = new Map();
   private userToRoom: Map<string, string> = new Map();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional()
+    @Inject(forwardRef(() => BotFillService))
+    private readonly botFillService?: BotFillService,
+  ) {}
 
   /**
    * Generates a unique 6-character alphanumeric room code (e.g., 'TRX9A2').
@@ -104,6 +117,17 @@ export class GameRoomService {
         socketId,
         displayName: hostUser.displayName || 'Host',
         avatarUrl: hostUser.avatarUrl,
+        level: (hostUser as any).level ?? 8,
+        xp: (hostUser as any).xp ?? 4500,
+        coins: (hostUser as any).coins ?? 2500,
+        stats: (hostUser as any).stats ?? {
+          gamesPlayed: 30,
+          wins: 17,
+          losses: 13,
+          soloWins: 10,
+          teamWins: 7,
+          winRate: 56.7,
+        },
         isConnected: true,
         isBot: false,
       },
@@ -135,6 +159,10 @@ export class GameRoomService {
     this.roomCodeToId.set(roomCode, roomId);
     this.socketToRoom.set(socketId, { roomId, seat: 0 });
     this.userToRoom.set(hostUser.id, roomId);
+
+    if (this.botFillService && !room.isPrivate) {
+      this.botFillService.scheduleBackfill(room);
+    }
 
     this.logger.log(`Room created: ${room.name} [Code: ${roomCode}, ID: ${roomId}] by User: ${hostUser.id}`);
     return room;
@@ -190,8 +218,19 @@ export class GameRoomService {
       socketId,
       displayName: user.displayName || `Player ${openSeat + 1}`,
       avatarUrl: user.avatarUrl,
+      level: (user as any).level ?? 8,
+      xp: (user as any).xp ?? 4500,
+      coins: (user as any).coins ?? 2500,
+      stats: (user as any).stats ?? {
+        gamesPlayed: 30,
+        wins: 17,
+        losses: 13,
+        soloWins: 10,
+        teamWins: 7,
+        winRate: 56.7,
+      },
       isConnected: true,
-      isBot: false,
+      isBot: (user as any).isBot ?? false,
     };
 
     room.players[openSeat] = newPlayer;
@@ -343,6 +382,9 @@ export class GameRoomService {
    * Destroys an active room and cleans up lookup maps.
    */
   public destroyRoom(roomId: string): void {
+    if (this.botFillService) {
+      this.botFillService.cancelBackfill(roomId);
+    }
     const room = this.rooms.get(roomId);
     if (room) {
       for (const p of room.players) {
