@@ -17,10 +17,10 @@ export class BotFillService {
 
   constructor(
     @Inject(forwardRef(() => GameRoomService))
-    private readonly gameRoomService: GameRoomService,
+    private readonly gameRoomService: any,
     @Optional()
     @Inject(forwardRef(() => GameGateway))
-    gateway?: GameGateway,
+    gateway?: any,
   ) {
     this.gateway = gateway;
   }
