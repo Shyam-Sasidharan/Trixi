@@ -24,6 +24,10 @@ export interface ActivePlayer {
   socketId: string;
   displayName: string;
   avatarUrl?: string;
+  level?: number;
+  xp?: number;
+  coins?: number;
+  stats?: any;
   isConnected: boolean;
   isBot: boolean;
   disconnectTimer?: NodeJS.Timeout;
@@ -63,8 +67,18 @@ export class GameRoomService {
   private roomCodeToId: Map<string, string> = new Map(); // Keyed by uppercase roomCode
   private socketToRoom: Map<string, { roomId: string; seat: number }> = new Map();
   private userToRoom: Map<string, string> = new Map();
+  private onRoomCreatedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
+  private onRoomDestroyedCallbacks: ((roomId: string) => void)[] = [];
 
   constructor(private readonly prisma: PrismaService) {}
+
+  public onRoomCreated(cb: (room: ActiveGameRoom) => void): void {
+    this.onRoomCreatedCallbacks.push(cb);
+  }
+
+  public onRoomDestroyed(cb: (roomId: string) => void): void {
+    this.onRoomDestroyedCallbacks.push(cb);
+  }
 
   /**
    * Generates a unique 6-character alphanumeric room code (e.g., 'TRX9A2').
@@ -104,6 +118,17 @@ export class GameRoomService {
         socketId,
         displayName: hostUser.displayName || 'Host',
         avatarUrl: hostUser.avatarUrl,
+        level: (hostUser as any).level ?? 8,
+        xp: (hostUser as any).xp ?? 4500,
+        coins: (hostUser as any).coins ?? 2500,
+        stats: (hostUser as any).stats ?? {
+          gamesPlayed: 30,
+          wins: 17,
+          losses: 13,
+          soloWins: 10,
+          teamWins: 7,
+          winRate: 56.7,
+        },
         isConnected: true,
         isBot: false,
       },
@@ -135,6 +160,14 @@ export class GameRoomService {
     this.roomCodeToId.set(roomCode, roomId);
     this.socketToRoom.set(socketId, { roomId, seat: 0 });
     this.userToRoom.set(hostUser.id, roomId);
+
+    for (const cb of this.onRoomCreatedCallbacks) {
+      try {
+        cb(room);
+      } catch (err: any) {
+        this.logger.warn(`Error in onRoomCreated callback: ${err.message}`);
+      }
+    }
 
     this.logger.log(`Room created: ${room.name} [Code: ${roomCode}, ID: ${roomId}] by User: ${hostUser.id}`);
     return room;
@@ -190,8 +223,19 @@ export class GameRoomService {
       socketId,
       displayName: user.displayName || `Player ${openSeat + 1}`,
       avatarUrl: user.avatarUrl,
+      level: (user as any).level ?? 8,
+      xp: (user as any).xp ?? 4500,
+      coins: (user as any).coins ?? 2500,
+      stats: (user as any).stats ?? {
+        gamesPlayed: 30,
+        wins: 17,
+        losses: 13,
+        soloWins: 10,
+        teamWins: 7,
+        winRate: 56.7,
+      },
       isConnected: true,
-      isBot: false,
+      isBot: (user as any).isBot ?? false,
     };
 
     room.players[openSeat] = newPlayer;
@@ -343,6 +387,13 @@ export class GameRoomService {
    * Destroys an active room and cleans up lookup maps.
    */
   public destroyRoom(roomId: string): void {
+    for (const cb of this.onRoomDestroyedCallbacks) {
+      try {
+        cb(roomId);
+      } catch (err: any) {
+        this.logger.warn(`Error in onRoomDestroyed callback: ${err.message}`);
+      }
+    }
     const room = this.rooms.get(roomId);
     if (room) {
       for (const p of room.players) {

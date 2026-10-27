@@ -3,24 +3,38 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Logger, UseFilters, UsePipes, ValidationPipe } from '@nestjs/common';
+import {
+  forwardRef,
+  Inject,
+  Logger,
+  Optional,
+  UseFilters,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { GameRoomService, ActiveGameRoom } from './services/game-room.service.js';
 import { RoomTimerService, TimerTickEvent } from './services/room-timer.service.js';
 import { PlayerViewSerializer, PlayerSeatInfo } from './serializers/player-view.serializer.js';
 import { ContractType, GameMode, KingdomType } from '../game-engine/types/contract.types.js';
 import { Card } from '../game-engine/types/card.types.js';
+import { BotActionService } from '../bot/bot-action.service.js';
+import { BotFillService } from '../bot/bot-fill.service.js';
 
 interface SocketUser {
   id: string;
   email: string;
   displayName: string;
   avatarUrl?: string;
+  level?: number;
+  coins?: number;
+  stats?: any;
 }
 
 @WebSocketGateway({
@@ -28,7 +42,7 @@ interface SocketUser {
     origin: '*',
   },
 })
-export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
   @WebSocketServer()
   server!: Server;
 
@@ -38,7 +52,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly gameRoomService: GameRoomService,
     private readonly roomTimerService: RoomTimerService,
     private readonly jwtService: JwtService,
-  ) {}
+    @Optional()
+    @Inject(forwardRef(() => BotActionService))
+    private readonly botActionService?: BotActionService,
+    @Optional()
+    @Inject(forwardRef(() => BotFillService))
+    private readonly botFillService?: BotFillService,
+  ) {
+    if (this.botActionService) this.botActionService.setGateway(this);
+    if (this.botFillService) this.botFillService.setGateway(this);
+  }
+
+  afterInit(server: Server) {
+    if (this.botActionService) this.botActionService.setGateway(this);
+    if (this.botFillService) this.botFillService.setGateway(this);
+  }
 
   /**
    * Validates JWT token from handshake auth or headers, attaching user to socket.
@@ -186,6 +214,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           id: user.id,
           displayName: user.displayName,
           avatarUrl: user.avatarUrl,
+          level: (user as any).level ?? 8,
+          coins: (user as any).coins ?? 2500,
+          stats: (user as any).stats ?? {
+            gamesPlayed: 30,
+            wins: 17,
+            losses: 13,
+            soloWins: 10,
+            teamWins: 7,
+            winRate: 56.7,
+          },
         },
       });
     }
@@ -222,24 +260,31 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; contracts: ContractType[] },
   ) {
-    const room = this.gameRoomService.getRoom(data.roomId);
+    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+    if (!mapping || mapping.room.roomId !== data.roomId) {
+      return { success: false, message: 'Unauthorized seat' };
+    }
+
+    return this.executeSelectContract(data.roomId, mapping.seat, data.contracts);
+  }
+
+  public executeSelectContract(
+    roomId: string,
+    seat: number,
+    contracts: ContractType[],
+  ) {
+    const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
     }
 
-    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (!mapping || mapping.room.roomId !== room.roomId) {
-      return { success: false, message: 'Unauthorized seat' };
-    }
-
-    const state = room.engine.getState();
     const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
-    if (mapping.seat !== ownerSeat) {
+    if (seat !== ownerSeat) {
       return { success: false, message: `Only the active Kingdom Owner (Seat ${ownerSeat}) can choose contracts` };
     }
 
     try {
-      const callOff = room.engine.selectContracts(data.contracts);
+      const callOff = room.engine.selectContracts(contracts);
 
       if (callOff.isCalledOff) {
         this.server.to(room.roomId).emit('call_off_triggered', {
@@ -267,7 +312,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           (tick) => {
             this.server.to(room.roomId).emit('timer_tick', tick);
           },
-          (roomId) => {
+          (doublingRoomId) => {
             // Doubling timeout -> start trick play
             if (room.engine && room.engine.getState().currentPhase === 'DOUBLING_PHASE') {
               room.engine.startTrickPlay();
@@ -293,23 +338,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; card: Card },
   ) {
-    const room = this.gameRoomService.getRoom(data.roomId);
+    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+    if (!mapping || mapping.room.roomId !== data.roomId) {
+      return { success: false, message: 'Unauthorized seat' };
+    }
+
+    return this.executeDeclareDouble(data.roomId, mapping.seat, data.card);
+  }
+
+  public executeDeclareDouble(roomId: string, seat: number, card: Card) {
+    const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
     }
 
-    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (!mapping || mapping.room.roomId !== room.roomId) {
-      return { success: false, message: 'Unauthorized seat' };
-    }
-
     try {
-      room.engine.doubleCard(mapping.seat, data.card);
+      room.engine.doubleCard(seat, card);
 
       this.server.to(room.roomId).emit('card_doubled', {
         roomId: room.roomId,
-        seat: mapping.seat,
-        card: data.card,
+        seat,
+        card,
       });
 
       this.broadcastMaskedState(room.roomId);
@@ -324,24 +373,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string; card: Card },
   ) {
-    const room = this.gameRoomService.getRoom(data.roomId);
+    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+    if (!mapping || mapping.room.roomId !== data.roomId) {
+      return { success: false, message: 'Unauthorized seat' };
+    }
+
+    return this.executePlayCard(data.roomId, mapping.seat, data.card);
+  }
+
+  public executePlayCard(roomId: string, seat: number, card: Card) {
+    const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
     }
 
-    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (!mapping || mapping.room.roomId !== room.roomId) {
-      return { success: false, message: 'Unauthorized seat' };
-    }
-
     const state = room.engine.getState();
-    if (state.currentTurnSeat !== mapping.seat) {
+    if (state.currentTurnSeat !== seat) {
       return { success: false, message: `Not your turn. Current turn: Seat ${state.currentTurnSeat}` };
     }
 
     try {
       if (state.currentPhase === 'TRICK_PLAY') {
-        const result = room.engine.playTrickCard(mapping.seat, data.card);
+        const result = room.engine.playTrickCard(seat, card);
 
         if (result.trickCompleted) {
           this.roomTimerService.stopTimer(room.roomId);
@@ -368,7 +421,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       if (state.currentPhase === 'TRIX_PLAY') {
-        const result = room.engine.playTrixCard(mapping.seat, data.card);
+        const result = room.engine.playTrixCard(seat, card);
 
         if (result.isContractOver) {
           this.handleContractEnd(room, result.scores);
@@ -391,22 +444,26 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomId: string },
   ) {
-    const room = this.gameRoomService.getRoom(data.roomId);
+    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+    if (!mapping || mapping.room.roomId !== data.roomId) {
+      return { success: false, message: 'Unauthorized seat' };
+    }
+
+    return this.executePassTrix(data.roomId, mapping.seat);
+  }
+
+  public executePassTrix(roomId: string, seat: number) {
+    const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
     }
 
-    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (!mapping || mapping.room.roomId !== room.roomId) {
-      return { success: false, message: 'Unauthorized seat' };
-    }
-
     try {
-      room.engine.passTrixTurn(mapping.seat);
+      room.engine.passTrixTurn(seat);
 
       this.server.to(room.roomId).emit('player_passed', {
         roomId: room.roomId,
-        seat: mapping.seat,
+        seat,
       });
 
       this.startRoomTurnTimer(room);
@@ -558,8 +615,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         socketId: p?.socketId,
         displayName: p?.displayName || `Seat ${s + 1}`,
         avatarUrl: p?.avatarUrl,
+        level: p?.level ?? 8,
+        coins: p?.coins ?? 2500,
+        stats: p?.stats ?? {
+          gamesPlayed: 30,
+          wins: 17,
+          losses: 13,
+          soloWins: 10,
+          teamWins: 7,
+          winRate: 56.7,
+        },
         isConnected: p?.isConnected ?? false,
-        isBot: p?.isBot ?? false,
+        isBot: false, // Disguised! Anti-detection objective: Flutter client NEVER receives isBot: true
       };
     }
 
@@ -574,5 +641,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.server.to(player.socketId).emit('game_state', sanitized);
       }
     }
+
+    // Trigger AI automation for any active bot seat
+    this.botActionService?.evaluateAndTrigger(room);
   }
 }
