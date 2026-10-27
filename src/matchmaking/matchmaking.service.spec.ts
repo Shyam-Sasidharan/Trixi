@@ -1,13 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MatchmakingService } from './matchmaking.service.js';
 import { RedisService } from '../common/redis/redis.service.js';
 import { GameRoomService } from '../game-room/services/game-room.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { BotFillService } from '../bot/bot-fill.service.js';
 
 describe('MatchmakingService', () => {
   let service: MatchmakingService;
   let gameRoomService: GameRoomService;
+  let mockBotFillService: any;
 
   beforeEach(async () => {
     const mockPrisma = {
@@ -19,17 +21,27 @@ describe('MatchmakingService', () => {
       getClient: () => ({ status: 'closed' }), // force in-memory fallback for test determinism
     };
 
+    mockBotFillService = {
+      populateRoomWithBots: vi.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MatchmakingService,
         GameRoomService,
         { provide: RedisService, useValue: mockRedis },
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: BotFillService, useValue: mockBotFillService },
       ],
     }).compile();
 
     service = module.get<MatchmakingService>(MatchmakingService);
     gameRoomService = module.get<GameRoomService>(GameRoomService);
+    service.setBotFillService(mockBotFillService as any);
+  });
+
+  afterEach(() => {
+    service.clearAllTimers();
   });
 
   it('should be defined', () => {
@@ -51,7 +63,7 @@ describe('MatchmakingService', () => {
     const res3 = await service.enqueue(p3, 's3', 'SOLO', 'FREE_MERCY');
     expect(res3.matchFound).toBe(false);
 
-    // 4th player completes queue
+    // 4th player completes queue immediately
     const res4 = await service.enqueue(p4, 's4', 'SOLO', 'FREE_MERCY');
     expect(res4.matchFound).toBe(true);
     expect(res4.room).toBeDefined();
@@ -72,5 +84,25 @@ describe('MatchmakingService', () => {
 
     const statusAfter = await service.getQueueStatus('u-cancel');
     expect(statusAfter.inQueue).toBe(false);
+  });
+
+  it('should start 6-second timer and backfill remaining seats with bots on timeout', async () => {
+    vi.useFakeTimers();
+    const p1 = { id: 'u-solo', displayName: 'Solo Player' };
+    const p2 = { id: 'u-duo', displayName: 'Duo Player' };
+
+    await service.enqueue(p1, 's-solo', 'SOLO', 'FREE_MERCY');
+    await service.enqueue(p2, 's-duo', 'SOLO', 'FREE_MERCY');
+
+    expect(service.hasActiveTimer('SOLO', 'FREE_MERCY')).toBe(true);
+
+    // Advance 6000ms: timer expires and forms room with p1 and p2, then calls botFillService
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(mockBotFillService.populateRoomWithBots).toHaveBeenCalled();
+    const status = await service.getQueueStatus('u-solo');
+    expect(status.inQueue).toBe(false);
+
+    vi.useRealTimers();
   });
 });

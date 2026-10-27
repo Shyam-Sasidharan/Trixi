@@ -106,14 +106,11 @@ export class BotFillService {
       return;
     }
 
-    // Stagger their entry (+800ms, +1800ms, +2900ms) to simulate authentic network joins
-    const defaultStaggers = [800, 1800, 2900];
+    // Stagger their entry (+800ms, +1600ms, +2400ms) with 800ms intervals
+    const staggerMs = customStaggerMs ?? 800;
 
     personas.forEach((persona, index) => {
-      const joinDelay =
-        customStaggerMs !== undefined
-          ? (index + 1) * customStaggerMs
-          : defaultStaggers[index] ?? (index + 1) * 1000;
+      const joinDelay = (index + 1) * staggerMs;
 
       const staggerTimer = setTimeout(() => {
         this.addBotToRoom(roomId, persona);
@@ -136,7 +133,7 @@ export class BotFillService {
     }
 
     // Check if room is already full
-    const openSeat = room.players.findIndex((p) => p === null);
+    const openSeat = room.players.findIndex((p: any) => p === null);
     if (openSeat === -1) {
       return null;
     }
@@ -161,29 +158,54 @@ export class BotFillService {
     );
 
     // Broadcast WebSocket events if Gateway is connected
-    if (this.gateway && this.gateway.server) {
-      if (result.matchStarted) {
-        this.gateway.server.to(room.roomId).emit('match_started', {
+    if (this.gateway) {
+      // 1. The bot persona is assigned with isConnected: true (set in joinRoom)
+      // 2. The server MUST immediately broadcast room_updated to the room channel
+      if (typeof this.gateway.broadcastRoomUpdated === 'function') {
+        this.gateway.broadcastRoomUpdated(room.roomId);
+      } else if (this.gateway.server) {
+        this.gateway.server.to(room.roomId).emit('room_updated', {
           roomId: room.roomId,
-          gameMode: room.gameMode,
-          kingdomType: room.kingdomType,
+          players: room.players
+            .filter((p: any) => p !== null)
+            .map((p: any) => ({
+              seat: p.seat,
+              seatIndex: p.seat,
+              displayName: p.displayName,
+              avatarUrl: p.avatarUrl,
+              isHost: p.seat === 0,
+              isReady: true,
+            })),
         });
+      }
 
-        this.gateway.startRoomTurnTimer(room);
-        this.gateway.broadcastMaskedState(room.roomId);
-      } else {
-        this.gateway.server.to(room.roomId).emit('player_joined', {
-          roomId: room.roomId,
-          seat: result.seat,
-          user: {
-            id: persona.id,
-            displayName: persona.displayName,
-            avatarUrl: persona.avatarUrl,
-            level: persona.level,
-            coins: persona.coins,
-            stats: persona.stats,
-          },
-        });
+      if (this.gateway.server) {
+        if (result.matchStarted) {
+          // As soon as Seat 3 (the 4th player) is filled:
+          // Instantiates TrixEngine match & deals cards (in joinRoom)
+          // Emit match_started and dispatch broadcastMaskedState(roomId)
+          this.gateway.server.to(room.roomId).emit('match_started', {
+            roomId: room.roomId,
+            gameMode: room.gameMode,
+            kingdomType: room.kingdomType,
+          });
+
+          this.gateway.startRoomTurnTimer(room);
+          this.gateway.broadcastMaskedState(room.roomId);
+        } else {
+          this.gateway.server.to(room.roomId).emit('player_joined', {
+            roomId: room.roomId,
+            seat: result.seat,
+            user: {
+              id: persona.id,
+              displayName: persona.displayName,
+              avatarUrl: persona.avatarUrl,
+              level: persona.level,
+              coins: persona.coins,
+              stats: persona.stats,
+            },
+          });
+        }
       }
     }
 

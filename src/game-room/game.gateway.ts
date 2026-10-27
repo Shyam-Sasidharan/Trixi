@@ -19,13 +19,14 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { GameRoomService, ActiveGameRoom } from './services/game-room.service.js';
+import { GameRoomService, ActiveGameRoom, ActivePlayer } from './services/game-room.service.js';
 import { RoomTimerService, TimerTickEvent } from './services/room-timer.service.js';
 import { PlayerViewSerializer, PlayerSeatInfo } from './serializers/player-view.serializer.js';
 import { ContractType, GameMode, KingdomType } from '../game-engine/types/contract.types.js';
 import { Card } from '../game-engine/types/card.types.js';
 import { BotActionService } from '../bot/bot-action.service.js';
 import { BotFillService } from '../bot/bot-fill.service.js';
+import { MatchmakingService } from '../matchmaking/matchmaking.service.js';
 
 interface SocketUser {
   id: string;
@@ -41,6 +42,9 @@ interface SocketUser {
   cors: {
     origin: '*',
   },
+  pingTimeout: 30000,
+  pingInterval: 10000,
+  transports: ['websocket', 'polling'],
 })
 export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
   @WebSocketServer()
@@ -58,14 +62,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     @Optional()
     @Inject(forwardRef(() => BotFillService))
     private readonly botFillService?: BotFillService,
+    @Optional()
+    @Inject(forwardRef(() => MatchmakingService))
+    private readonly matchmakingService?: MatchmakingService,
   ) {
     if (this.botActionService) this.botActionService.setGateway(this);
     if (this.botFillService) this.botFillService.setGateway(this);
+    if (this.matchmakingService) this.matchmakingService.setGateway(this);
   }
 
   afterInit(server: Server) {
     if (this.botActionService) this.botActionService.setGateway(this);
     if (this.botFillService) this.botFillService.setGateway(this);
+    if (this.matchmakingService) this.matchmakingService.setGateway(this);
   }
 
   /**
@@ -123,14 +132,37 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Socket disconnected: ${client.id}`);
+    if (this.matchmakingService && client.data?.user?.id) {
+      this.matchmakingService.dequeue(client.data.user.id).catch(() => {});
+    }
     const disconnected = this.gameRoomService.handleDisconnect(client.id, (roomId, seat) => {
       // Called when 30s grace timer expires and seat becomes bot
       this.broadcastMaskedState(roomId);
     });
 
     if (disconnected) {
+      this.broadcastRoomUpdated(disconnected.roomId);
       this.broadcastMaskedState(disconnected.roomId);
     }
+  }
+
+  public broadcastRoomUpdated(roomId: string): void {
+    const room = this.gameRoomService.getRoom(roomId);
+    if (!room) return;
+
+    this.server.to(roomId).emit('room_updated', {
+      roomId,
+      players: room.players
+        .filter((p): p is ActivePlayer => p !== null)
+        .map((p) => ({
+          seat: p.seat,
+          seatIndex: p.seat,
+          displayName: p.displayName,
+          avatarUrl: p.avatarUrl,
+          isHost: p.seat === 0,
+          isReady: true,
+        })),
+    });
   }
 
   private getUserFromSocket(client: Socket): SocketUser {
@@ -156,17 +188,75 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     },
   ) {
     const user = this.getUserFromSocket(client);
+    const gameMode = data?.gameMode || 'SOLO';
+    const kingdomType = data?.kingdomType || 'FREE_MERCY';
+
+    // If public room without password, check if there is an existing waiting public room to group human players
+    if (!data?.isPrivate && !data?.password) {
+      const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType);
+      if (existingRoom) {
+        const result = this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
+        client.join(existingRoom.roomId);
+
+        this.broadcastRoomUpdated(existingRoom.roomId);
+
+        if (result.matchStarted) {
+          this.server.to(existingRoom.roomId).emit('match_started', {
+            roomId: existingRoom.roomId,
+            gameMode: existingRoom.gameMode,
+            kingdomType: existingRoom.kingdomType,
+          });
+          this.startRoomTurnTimer(existingRoom);
+          this.broadcastMaskedState(existingRoom.roomId);
+        } else {
+          this.server.to(existingRoom.roomId).emit('player_joined', {
+            roomId: existingRoom.roomId,
+            seat: result.seat,
+            user: {
+              id: user.id,
+              displayName: user.displayName,
+              avatarUrl: user.avatarUrl,
+              level: (user as any).level ?? 8,
+              coins: (user as any).coins ?? 2500,
+              stats: (user as any).stats ?? {
+                gamesPlayed: 30,
+                wins: 17,
+                losses: 13,
+                soloWins: 10,
+                teamWins: 7,
+                winRate: 56.7,
+              },
+            },
+          });
+        }
+
+        return {
+          success: true,
+          roomId: existingRoom.roomId,
+          roomCode: existingRoom.roomCode,
+          name: existingRoom.name,
+          gameMode: existingRoom.gameMode,
+          kingdomType: existingRoom.kingdomType,
+          seat: result.seat,
+          matchStarted: result.matchStarted,
+        };
+      }
+    }
+
     const room = this.gameRoomService.createRoom(user, client.id, {
       name: data?.name || `${user.displayName}'s Room`,
       password: data?.password,
-      gameMode: data?.gameMode || 'SOLO',
-      kingdomType: data?.kingdomType || 'FREE_MERCY',
+      gameMode,
+      kingdomType,
       turnTime: data?.turnTime || 20,
       allowSpectators: data?.allowSpectators ?? true,
       isPrivate: data?.isPrivate ?? false,
     });
 
     client.join(room.roomId);
+
+    // Immediately broadcast room_updated to the host so the lobby initializes
+    this.broadcastRoomUpdated(room.roomId);
 
     return {
       success: true,
@@ -176,6 +266,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       gameMode: room.gameMode,
       kingdomType: room.kingdomType,
       seat: 0,
+      matchStarted: false,
     };
   }
 
@@ -193,6 +284,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     );
 
     client.join(result.room.roomId);
+
+    // Broadcast room_updated immediately
+    this.broadcastRoomUpdated(result.room.roomId);
 
     if (result.matchStarted) {
       // 4th player joined! Match starts automatically
@@ -234,6 +328,58 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       seat: result.seat,
       matchStarted: result.matchStarted,
     };
+  }
+
+  @SubscribeMessage('quick_play')
+  async handleQuickPlay(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data?: { gameMode?: GameMode; kingdomType?: KingdomType },
+  ) {
+    const user = this.getUserFromSocket(client);
+    const gameMode = data?.gameMode || 'SOLO';
+    const kingdomType = data?.kingdomType || 'FREE_MERCY';
+
+    if (this.matchmakingService) {
+      const result = await this.matchmakingService.enqueue(
+        user,
+        client.id,
+        gameMode,
+        kingdomType,
+      );
+      if (result.matchFound && result.room) {
+        return {
+          success: true,
+          matchFound: true,
+          roomId: result.room.roomId,
+          roomCode: result.room.roomCode,
+        };
+      }
+      return { success: true, matchFound: false, inQueue: true };
+    }
+
+    return this.handleCreateRoom(client, {
+      gameMode,
+      kingdomType,
+      isPrivate: false,
+    });
+  }
+
+  @SubscribeMessage('join_queue')
+  async handleJoinQueue(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data?: { gameMode?: GameMode; kingdomType?: KingdomType },
+  ) {
+    return this.handleQuickPlay(client, data);
+  }
+
+  @SubscribeMessage('leave_queue')
+  async handleLeaveQueue(@ConnectedSocket() client: Socket) {
+    const user = this.getUserFromSocket(client);
+    if (this.matchmakingService) {
+      const dequeued = await this.matchmakingService.dequeue(user.id);
+      return { success: true, dequeued };
+    }
+    return { success: true, dequeued: false };
   }
 
   @SubscribeMessage('reconnect_game')

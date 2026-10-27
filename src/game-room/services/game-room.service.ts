@@ -272,6 +272,30 @@ export class GameRoomService {
   }
 
   /**
+   * Finds an active public room waiting for players with at least one open seat.
+   */
+  public findWaitingPublicRoom(
+    gameMode: GameMode,
+    kingdomType: KingdomType,
+  ): ActiveGameRoom | null {
+    for (const room of this.rooms.values()) {
+      if (
+        !room.isPrivate &&
+        !room.password &&
+        room.status === 'WAITING' &&
+        room.gameMode === gameMode &&
+        room.kingdomType === kingdomType
+      ) {
+        const hasOpenSeat = room.players.some((p) => p === null);
+        if (hasOpenSeat) {
+          return room;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns current count of active game rooms.
    */
   public getActiveRoomsCount(): number {
