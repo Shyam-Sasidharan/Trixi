@@ -41,6 +41,7 @@ export interface CreateRoomConfig {
   turnTime?: number; // 10, 20, 30
   allowSpectators?: boolean;
   isPrivate?: boolean;
+  allowBots?: boolean;
 }
 
 export interface ActiveGameRoom {
@@ -53,11 +54,17 @@ export interface ActiveGameRoom {
   turnTime: number;
   allowSpectators: boolean;
   isPrivate: boolean;
+  allowBots: boolean;
   hostUserId: string;
   createdAt: Date;
   players: (ActivePlayer | null)[];
   status: 'WAITING' | 'STARTING' | 'IN_PROGRESS' | 'FINISHED' | 'CANCELLED';
   engine: TrixEngine | null;
+  turnId: number;
+  stateVersion: number;
+  turnDeadlineTimestamp: number | null;
+  actionHistory: Map<number, string[]>;
+  isProcessingAction?: boolean;
 }
 
 @Injectable()
@@ -67,8 +74,11 @@ export class GameRoomService {
   private roomCodeToId: Map<string, string> = new Map(); // Keyed by uppercase roomCode
   private socketToRoom: Map<string, { roomId: string; seat: number }> = new Map();
   private userToRoom: Map<string, string> = new Map();
+  private userToSocket: Map<string, string> = new Map();
+  private socketToUser: Map<string, string> = new Map();
   private onRoomCreatedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
   private onRoomDestroyedCallbacks: ((roomId: string) => void)[] = [];
+  private onPlayerJoinedCallbacks: ((room: ActiveGameRoom, seat: number, isBot: boolean) => void)[] = [];
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -78,6 +88,10 @@ export class GameRoomService {
 
   public onRoomDestroyed(cb: (roomId: string) => void): void {
     this.onRoomDestroyedCallbacks.push(cb);
+  }
+
+  public onPlayerJoined(cb: (room: ActiveGameRoom, seat: number, isBot: boolean) => void): void {
+    this.onPlayerJoinedCallbacks.push(cb);
   }
 
   /**
@@ -149,17 +163,24 @@ export class GameRoomService {
       turnTime,
       allowSpectators: config.allowSpectators ?? true,
       isPrivate: config.isPrivate ?? false,
+      allowBots: config.allowBots ?? (!config.isPrivate),
       hostUserId: hostUser.id,
       createdAt: new Date(),
       players,
       status: 'WAITING',
       engine: null,
+      turnId: 1,
+      stateVersion: 1,
+      turnDeadlineTimestamp: null,
+      actionHistory: new Map(),
     };
 
     this.rooms.set(roomId, room);
     this.roomCodeToId.set(roomCode, roomId);
     this.socketToRoom.set(socketId, { roomId, seat: 0 });
     this.userToRoom.set(hostUser.id, roomId);
+    this.userToSocket.set(hostUser.id, socketId);
+    this.socketToUser.set(socketId, hostUser.id);
 
     for (const cb of this.onRoomCreatedCallbacks) {
       try {
@@ -208,6 +229,8 @@ export class GameRoomService {
         player.disconnectTimer = undefined;
       }
       this.socketToRoom.set(socketId, { roomId: room.roomId, seat: existingPlayerIndex });
+      this.userToSocket.set(user.id, socketId);
+      this.socketToUser.set(socketId, user.id);
       return { room, seat: existingPlayerIndex, matchStarted: room.status === 'IN_PROGRESS' };
     }
 
@@ -241,6 +264,17 @@ export class GameRoomService {
     room.players[openSeat] = newPlayer;
     this.socketToRoom.set(socketId, { roomId: room.roomId, seat: openSeat });
     this.userToRoom.set(user.id, room.roomId);
+    this.userToSocket.set(user.id, socketId);
+    this.socketToUser.set(socketId, user.id);
+
+    // Notify listeners that a player joined (e.g. human join resets 6s bot backfill window)
+    for (const cb of this.onPlayerJoinedCallbacks) {
+      try {
+        cb(room, openSeat, newPlayer.isBot);
+      } catch (err: any) {
+        this.logger.warn(`Error in onPlayerJoined callback: ${err.message}`);
+      }
+    }
 
     let matchStarted = false;
 
@@ -249,6 +283,8 @@ export class GameRoomService {
     if (allFilled && room.status === 'WAITING') {
       room.status = 'IN_PROGRESS';
       room.engine = new TrixEngine(room.gameMode, room.kingdomType);
+      room.turnId = 1;
+      room.stateVersion = 1;
       matchStarted = true;
       this.logger.log(`Room [${room.roomCode}] full! Match started with 4 players.`);
     }
@@ -316,6 +352,14 @@ export class GameRoomService {
     return this.rooms.get(roomId) || null;
   }
 
+  public getSocketIdByUserId(userId: string): string | null {
+    return this.userToSocket.get(userId) || null;
+  }
+
+  public getUserIdBySocketId(socketId: string): string | null {
+    return this.socketToUser.get(socketId) || null;
+  }
+
   /**
    * Handles player disconnection with a 30-second grace timer.
    */
@@ -348,6 +392,11 @@ export class GameRoomService {
       }, 30000);
     }
 
+    const userId = this.socketToUser.get(socketId);
+    if (userId) {
+      this.userToSocket.delete(userId);
+    }
+    this.socketToUser.delete(socketId);
     this.socketToRoom.delete(socketId);
     return mapping;
   }
@@ -366,6 +415,12 @@ export class GameRoomService {
     if (seat === -1) return null;
 
     const player = room.players[seat]!;
+    // Clean old socket mapping if any
+    if (player.socketId) {
+      this.socketToRoom.delete(player.socketId);
+      this.socketToUser.delete(player.socketId);
+    }
+
     player.socketId = newSocketId;
     player.isConnected = true;
     player.isBot = false;
@@ -376,6 +431,8 @@ export class GameRoomService {
     }
 
     this.socketToRoom.set(newSocketId, { roomId: room.roomId, seat });
+    this.userToSocket.set(userId, newSocketId);
+    this.socketToUser.set(newSocketId, userId);
     this.logger.log(`Player ${player.displayName} reconnected to Seat ${seat} in room ${room.roomCode}`);
 
     return { room, seat };
@@ -394,10 +451,14 @@ export class GameRoomService {
       if (player?.disconnectTimer) {
         clearTimeout(player.disconnectTimer);
       }
-      this.socketToRoom.delete(player?.socketId || '');
+      if (player?.socketId) {
+        this.socketToRoom.delete(player.socketId);
+        this.socketToUser.delete(player.socketId);
+      }
       room.players[seatIndex] = null;
     }
 
+    this.userToSocket.delete(userId);
     this.userToRoom.delete(userId);
 
     // If host left and game hasn't started, cancel room or pass host
@@ -423,7 +484,11 @@ export class GameRoomService {
       for (const p of room.players) {
         if (p) {
           if (p.disconnectTimer) clearTimeout(p.disconnectTimer);
-          this.socketToRoom.delete(p.socketId);
+          if (p.socketId) {
+            this.socketToRoom.delete(p.socketId);
+            this.socketToUser.delete(p.socketId);
+          }
+          this.userToSocket.delete(p.userId);
           this.userToRoom.delete(p.userId);
         }
       }

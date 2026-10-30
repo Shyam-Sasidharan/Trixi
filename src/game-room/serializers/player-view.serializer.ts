@@ -60,6 +60,9 @@ export interface SanitizedPlayerGameState {
   lastTrickWinner: number | null;
   isDoublingPhase: boolean;
   canDoubleCards: Card[];
+  turnId?: number;
+  stateVersion?: number;
+  turnDeadlineTimestamp?: number | null;
 }
 
 export class PlayerViewSerializer {
@@ -74,6 +77,9 @@ export class PlayerViewSerializer {
     options?: {
       turnTimeLimit?: number;
       seatsInfo?: Record<number, PlayerSeatInfo>;
+      turnId?: number;
+      stateVersion?: number;
+      turnDeadlineTimestamp?: number | null;
     },
   ): SanitizedPlayerGameState {
     if (targetSeat < 0 || targetSeat > 3) {
@@ -192,6 +198,9 @@ export class PlayerViewSerializer {
       lastTrickWinner,
       isDoublingPhase,
       canDoubleCards,
+      turnId: options?.turnId ?? 1,
+      stateVersion: options?.stateVersion ?? 1,
+      turnDeadlineTimestamp: options?.turnDeadlineTimestamp ?? null,
     };
   }
 }

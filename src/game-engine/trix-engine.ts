@@ -238,6 +238,8 @@ export class TrixEngine {
     trickWinner?: number;
     contractEnded?: boolean;
     scores?: Record<number, number>;
+    winningCard?: Card;
+    trickCards?: { seat: number; card: Card }[];
   } {
     if (this.state.currentPhase !== 'TRICK_PLAY') {
       throw new Error(`Cannot play trick card during phase: ${this.state.currentPhase}`);
@@ -292,26 +294,65 @@ export class TrixEngine {
       return { trickCompleted: false };
     }
 
-    // Trick is complete with 4 cards!
-    const { winnerSeat, winningCard } = TrickEngine.determineWinner(this.state.currentTrick);
-    this.state.currentTrick.winnerSeat = winnerSeat;
-    this.state.currentTrick.winningCard = winningCard;
-
-    const completedTrick: Trick = { ...this.state.currentTrick };
-    this.state.trickHistory.push({ seat: winnerSeat, trick: completedTrick });
-
-    // Winner leads next trick
-    this.state.currentTurnSeat = winnerSeat;
-    this.state.currentTrick = { leadSuit: null, cards: [] };
-
-    // Check if round finished (13 tricks completed)
-    if (this.state.trickHistory.length === 13) {
-      return this.finalizeNegativeContract();
-    }
+    // 4th card played! Evaluate trick immediately and lock into TRICK_EVALUATING
+    const evaluated = this.evaluateTrick();
 
     return {
       trickCompleted: true,
-      trickWinner: winnerSeat,
+      trickWinner: evaluated.winnerSeat,
+      winningCard: evaluated.winningCard,
+      trickCards: evaluated.trickCards,
+      contractEnded: false,
+    };
+  }
+
+  /**
+   * Evaluates the completed trick of 4 cards and transitions phase to TRICK_EVALUATING.
+   */
+  public evaluateTrick(): {
+    winnerSeat: number;
+    winningCard: Card;
+    trickCards: { seat: number; card: Card }[];
+  } {
+    if (this.state.currentTrick.cards.length !== 4) {
+      throw new Error('Cannot evaluate trick with less than 4 cards');
+    }
+    const { winnerSeat, winningCard } = TrickEngine.determineWinner(this.state.currentTrick);
+    this.state.currentTrick.winnerSeat = winnerSeat;
+    this.state.currentTrick.winningCard = winningCard;
+    this.state.currentPhase = 'TRICK_EVALUATING';
+
+    return {
+      winnerSeat,
+      winningCard,
+      trickCards: [...this.state.currentTrick.cards],
+    };
+  }
+
+  /**
+   * Clears the evaluated trick from the table, stores it in trickHistory,
+   * advances currentTurnSeat to the winner, and checks for negative contract completion.
+   */
+  public clearTrickAndAdvance(winnerSeat: number): {
+    contractEnded: boolean;
+    scores?: Record<number, number>;
+  } {
+    const completedTrick: Trick = { ...this.state.currentTrick };
+    this.state.trickHistory.push({ seat: winnerSeat, trick: completedTrick });
+    this.state.currentTrick = { leadSuit: null, cards: [] };
+    this.state.currentTurnSeat = winnerSeat;
+
+    // Check if round finished (13 tricks completed)
+    if (this.state.trickHistory.length === 13) {
+      const res = this.finalizeNegativeContract();
+      return {
+        contractEnded: true,
+        scores: res.scores,
+      };
+    }
+
+    this.state.currentPhase = 'TRICK_PLAY';
+    return {
       contractEnded: false,
     };
   }

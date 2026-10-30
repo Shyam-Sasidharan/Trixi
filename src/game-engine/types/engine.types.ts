@@ -6,6 +6,7 @@ export type GamePhase =
   | 'CALL_OFF_CHECK'
   | 'DOUBLING_PHASE'
   | 'TRICK_PLAY'
+  | 'TRICK_EVALUATING'
   | 'TRIX_PLAY'
   | 'CONTRACT_END'
   | 'KINGDOM_END'

@@ -209,14 +209,21 @@ async function runStressTest() {
     const turnBot = bots.find((b) => b.seat === currentTurnSeat)!;
     const botState = latestStates[turnBot.seat!];
 
-    // Pick first card in hand
-    const cardToPlay = botState.myHand[0];
+    // Pick legal card in hand (follow suit if current trick has lead card)
+    let cardToPlay = botState.myHand[0];
+    if (currentState.currentTrick && currentState.currentTrick.length > 0) {
+      const leadSuit = currentState.currentTrick[0].card.suit;
+      const followingCard = botState.myHand.find((c: any) => c.suit === leadSuit);
+      if (followingCard) {
+        cardToPlay = followingCard;
+      }
+    }
     console.log(` -> Turn: Seat ${currentTurnSeat} (${turnBot.displayName}) playing ${cardToPlay.rank} of ${cardToPlay.suit}`);
 
     const playRes = await new Promise<any>((resolve) => {
       turnBot.socket!.emit(
         'play_card',
-        { roomId, card: cardToPlay },
+        { roomId, card: cardToPlay, turnId: currentState.turnId, actionId: `action-${cardCount}-${runId}` },
         (res: any) => resolve(res),
       );
     });
@@ -230,7 +237,7 @@ async function runStressTest() {
   }
 
   const trickResult = await trickCompletedPromise;
-  console.log(` -> Trick 1 Complete! Winner: Seat ${trickResult.winnerSeat}`);
+  console.log(` -> Trick 1 Complete! Winner: Seat ${trickResult.trickWinnerSeat ?? trickResult.winnerSeat}`);
 
   console.log('\n[Phase 8] Teardown & Graceful Socket Cleanup...');
   for (const bot of bots) {

@@ -4,8 +4,8 @@ import type { GameGateway } from '../game-room/game.gateway.js';
 import { BotPersona, getRandomBotPersonas } from './bot-persona.data.js';
 
 export interface BackfillOptions {
-  backfillDelayMs?: number; // Delay before starting backfill (default: 3500ms - 5000ms)
-  staggerDelayMs?: number; // Base delay between bot joins (default: 800ms - 1100ms)
+  backfillDelayMs?: number; // Delay before starting backfill (default: 6000ms)
+  staggerDelayMs?: number; // Delay between bot joins (default: 6000ms)
   immediate?: boolean; // For synchronous/instant execution in tests
 }
 
@@ -21,13 +21,25 @@ export class BotFillService {
   ) {
     if (this.gameRoomService && typeof this.gameRoomService.onRoomCreated === 'function') {
       this.gameRoomService.onRoomCreated((room: ActiveGameRoom) => {
-        if (!room.isPrivate) {
+        if (!room.isPrivate && room.allowBots) {
           this.scheduleBackfill(room);
         }
       });
       this.gameRoomService.onRoomDestroyed((roomId: string) => {
         this.cancelBackfill(roomId);
       });
+      if (typeof this.gameRoomService.onPlayerJoined === 'function') {
+        this.gameRoomService.onPlayerJoined((room: ActiveGameRoom, seat: number, isBot: boolean) => {
+          // If a new human joins before 6s, fill that seat with human and reset 6s window for remaining seats
+          if (!isBot && room.allowBots && room.status === 'WAITING') {
+            const hasEmptySeats = room.players.some((p) => p === null);
+            if (hasEmptySeats) {
+              this.logger.log(`Human joined room ${room.roomCode}. Resetting 6-second bot backfill timer.`);
+              this.scheduleBackfill(room, { backfillDelayMs: 6000, staggerDelayMs: 6000 });
+            }
+          }
+        });
+      }
     }
   }
 
@@ -36,11 +48,15 @@ export class BotFillService {
   }
 
   /**
-   * Schedules a backfill timer for a waiting room.
-   * If the room is not full when the timer expires, bot personas are selected and join with staggered delays.
+   * Schedules a 6-second recursive bot backfill timer for a waiting room.
+   * If allowBots is false, NEVER adds bots.
    */
   public scheduleBackfill(room: ActiveGameRoom, options?: BackfillOptions): void {
     if (!room || room.status !== 'WAITING') return;
+    if (room.allowBots === false) {
+      this.logger.log(`Room ${room.roomCode} has allowBots=false; skipping bot backfill.`);
+      return;
+    }
 
     this.cancelBackfill(room.roomId);
 
@@ -49,23 +65,58 @@ export class BotFillService {
       return;
     }
 
-    const delay =
-      options?.backfillDelayMs ??
-      Math.floor(3500 + Math.random() * 1500); // 3.5s - 5.0s window
+    const delay = options?.backfillDelayMs ?? 6000;
 
     this.logger.log(
-      `Scheduling bot backfill for Room ${room.roomCode} in ${delay}ms`,
+      `Scheduling 6-second bot backfill for Room ${room.roomCode} in ${delay}ms`,
     );
 
     const timer = setTimeout(() => {
-      this.populateRoomWithBots(room.roomId, false, options?.staggerDelayMs);
+      if (options?.staggerDelayMs !== undefined) {
+        this.populateRoomWithBots(room.roomId, false, options.staggerDelayMs);
+      } else {
+        this.populateNextBot(room.roomId, 6000);
+      }
     }, delay);
 
     this.registerTimer(room.roomId, timer);
   }
 
   /**
-   * Immediately fills all open seats in a room with realistic bot personas.
+   * Populates a single bot into the next open seat, and if seats remain open,
+   * recursively schedules the next bot in staggerDelayMs (default 6000ms).
+   */
+  private populateNextBot(roomId: string, staggerDelayMs: number = 6000): void {
+    const room = this.gameRoomService.getRoom(roomId);
+    if (!room || room.status !== 'WAITING' || room.allowBots === false) return;
+
+    const openSeat = room.players.findIndex((p) => p === null);
+    if (openSeat === -1) {
+      this.logger.log(`Room ${room.roomCode} is full; skipping backfill.`);
+      return;
+    }
+
+    const seatedUserIds = room.players.filter((p) => p !== null).map((p) => p!.userId);
+    const [persona] = getRandomBotPersonas(1, seatedUserIds);
+    if (!persona) return;
+
+    const result = this.addBotToRoom(room.roomId, persona);
+    if (!result) return;
+
+    // If match has not started yet (still open seats), schedule next bot backfill after staggerDelayMs
+    if (!result.matchStarted) {
+      const stillOpen = room.players.some((p) => p === null);
+      if (stillOpen) {
+        const nextTimer = setTimeout(() => {
+          this.populateNextBot(roomId, staggerDelayMs);
+        }, staggerDelayMs);
+        this.registerTimer(roomId, nextTimer);
+      }
+    }
+  }
+
+  /**
+   * Fills open seats in a room with realistic bot personas (supporting immediate execution or custom stagger).
    */
   public populateRoomWithBots(
     roomId: string,
@@ -73,7 +124,7 @@ export class BotFillService {
     customStaggerMs?: number,
   ): void {
     const room = this.gameRoomService.getRoom(roomId);
-    if (!room || room.status !== 'WAITING') return;
+    if (!room || room.status !== 'WAITING' || room.allowBots === false) return;
 
     const openSeats: number[] = [];
     const seatedUserIds: string[] = [];
@@ -106,8 +157,7 @@ export class BotFillService {
       return;
     }
 
-    // Stagger their entry (+800ms, +1600ms, +2400ms) with 800ms intervals
-    const staggerMs = customStaggerMs ?? 800;
+    const staggerMs = customStaggerMs ?? 6000;
 
     personas.forEach((persona, index) => {
       const joinDelay = (index + 1) * staggerMs;
@@ -154,13 +204,11 @@ export class BotFillService {
     const result = this.gameRoomService.joinRoom(botUser, botSocketId, roomId);
 
     this.logger.log(
-      `Bot ${persona.displayName} seated at Seat ${result.seat} in Room ${room.roomCode} (MatchStarted: ${result.matchStarted})`,
+      `[BOT_JOINED] Room: ${room.roomId}, Seat: ${result.seat}, Bot: ${persona.displayName}, StateVersion: ${room.stateVersion}`,
     );
 
     // Broadcast WebSocket events if Gateway is connected
     if (this.gateway) {
-      // 1. The bot persona is assigned with isConnected: true (set in joinRoom)
-      // 2. The server MUST immediately broadcast room_updated to the room channel
       if (typeof this.gateway.broadcastRoomUpdated === 'function') {
         this.gateway.broadcastRoomUpdated(room.roomId);
       } else if (this.gateway.server) {
@@ -193,6 +241,7 @@ export class BotFillService {
           this.gateway.startRoomTurnTimer(room);
           this.gateway.broadcastMaskedState(room.roomId);
         } else {
+          // Never send isBot: true
           this.gateway.server.to(room.roomId).emit('player_joined', {
             roomId: room.roomId,
             seat: result.seat,

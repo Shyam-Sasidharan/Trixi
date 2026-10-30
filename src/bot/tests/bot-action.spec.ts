@@ -134,7 +134,10 @@ describe('BotActionService (Turn Automation & Latency Simulation)', () => {
     roomService.joinRoom({ id: 'bot-2', displayName: 'Bot Zaid', isBot: true } as any, 's-b2', room.roomId);
     roomService.joinRoom({ id: 'bot-3', displayName: 'Bot Layla', isBot: true } as any, 's-b3', room.roomId);
 
-    room.engine!.selectContracts(['TRIX']);
+    let callOff = room.engine!.selectContracts(['TRIX']);
+    while (callOff.isCalledOff) {
+      callOff = room.engine!.selectContracts(['TRIX']);
+    }
     const state = room.engine!.getState();
     expect(state.currentPhase).toBe('TRIX_PLAY');
 
