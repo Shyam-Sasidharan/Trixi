@@ -97,11 +97,14 @@ describe('BotFillService (Matchmaking Backfill & Anti-Detection Disguise)', () =
 
     // Verify match_started was emitted
     expect(mockServer.to).toHaveBeenCalledWith(room.roomId);
-    expect(mockServer.emit).toHaveBeenCalledWith('match_started', {
-      roomId: room.roomId,
-      gameMode: 'SOLO',
-      kingdomType: 'FREE_MERCY',
-    });
+    expect(mockServer.emit).toHaveBeenCalledWith(
+      'match_started',
+      expect.objectContaining({
+        roomId: room.roomId,
+        gameMode: 'SOLO',
+        kingdomType: 'FREE_MERCY',
+      }),
+    );
   });
 
   it('should verify that all player payloads contain complete profile fields and NO isBot: true leaks', () => {
@@ -132,7 +135,7 @@ describe('BotFillService (Matchmaking Backfill & Anti-Detection Disguise)', () =
       (call: any[]) => call[0] === 'player_joined',
     );
 
-    expect(playerJoinedCalls.length).toBe(2); // Seats 1 and 2 emit player_joined (seat 3 triggers match_started)
+    expect(playerJoinedCalls.length).toBe(3); // Seats 1, 2, and 3 all emit player_joined per BE-07
 
     for (const call of playerJoinedCalls) {
       const payload = call[1];

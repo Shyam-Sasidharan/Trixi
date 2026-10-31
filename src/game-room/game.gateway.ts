@@ -14,6 +14,9 @@ import {
   Inject,
   Logger,
   Optional,
+  NotFoundException,
+  ConflictException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { GameRoomService, ActiveGameRoom, ActivePlayer } from './services/game-room.service.js';
@@ -56,6 +59,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
   private readonly logger = new Logger(GameGateway.name);
   private roomLocks: Map<string, Promise<any>> = new Map();
+  private socketToRooms: Map<string, Set<string>> = new Map();
 
   constructor(
     private readonly gameRoomService: GameRoomService,
@@ -74,12 +78,131 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     if (this.botActionService) this.botActionService.setGateway(this);
     if (this.botFillService) this.botFillService.setGateway(this);
     if (this.matchmakingService) this.matchmakingService.setGateway(this);
+
+    if (this.gameRoomService && typeof this.gameRoomService.onMatchStarted === 'function') {
+      this.gameRoomService.onMatchStarted((room) => {
+        this.triggerMatchStart(room);
+      });
+    }
   }
 
   afterInit(server: Server) {
     if (this.botActionService) this.botActionService.setGateway(this);
     if (this.botFillService) this.botFillService.setGateway(this);
     if (this.matchmakingService) this.matchmakingService.setGateway(this);
+  }
+
+  public trackSocketRoom(client: Socket, roomId: string): void {
+    client.join(roomId);
+    let rooms = this.socketToRooms.get(client.id);
+    if (!rooms) {
+      rooms = new Set();
+      this.socketToRooms.set(client.id, rooms);
+    }
+    rooms.add(roomId);
+  }
+
+  public leaveAllRoomsForSocket(client: Socket, userId?: string, keepRoomId?: string): void {
+    const rooms = this.socketToRooms.get(client.id);
+    if (rooms) {
+      for (const rId of rooms) {
+        if (keepRoomId && (rId === keepRoomId || rId.toUpperCase() === keepRoomId.toUpperCase())) continue;
+        client.leave(rId);
+        if (userId) {
+          this.gameRoomService.leaveRoom(userId, rId);
+        }
+        rooms.delete(rId);
+      }
+      if (rooms.size === 0) {
+        this.socketToRooms.delete(client.id);
+      }
+    }
+
+    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+    if (mapping && (!keepRoomId || (mapping.room.roomId !== keepRoomId && mapping.room.roomCode !== keepRoomId.toUpperCase()))) {
+      client.leave(mapping.room.roomId);
+      if (userId) {
+        this.gameRoomService.leaveRoom(userId, mapping.room.roomId);
+      }
+    }
+  }
+
+  public leaveAllSocketChannels(client: Socket, keepRoomId?: string): void {
+    const rooms = this.socketToRooms.get(client.id);
+    if (rooms) {
+      for (const rId of rooms) {
+        if (keepRoomId && (rId === keepRoomId || rId.toUpperCase() === keepRoomId.toUpperCase())) continue;
+        client.leave(rId);
+        rooms.delete(rId);
+      }
+      if (rooms.size === 0) {
+        this.socketToRooms.delete(client.id);
+      }
+    }
+  }
+
+  /**
+   * Broadcasts strictly sequential join sequence:
+   * player_joined -> room_updated -> match_started (if matchStarted) -> game_state
+   */
+  public broadcastLobbyJoinSequence(
+    room: ActiveGameRoom,
+    seat: number,
+    user: any,
+    matchStarted: boolean,
+  ): void {
+    if (!this.server) return;
+
+    // 1. player_joined (for every seat, including Seat 3 / 4th player)
+    this.server.to(room.roomId).emit('player_joined', {
+      roomId: room.roomId,
+      seat,
+      roomSequence: ++room.roomSequence,
+      user: {
+        id: user.id,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        level: user.level ?? 8,
+        coins: user.coins ?? 2500,
+        stats: user.stats ?? {
+          gamesPlayed: 30,
+          wins: 17,
+          losses: 13,
+          soloWins: 10,
+          teamWins: 7,
+          winRate: 56.7,
+        },
+      },
+    });
+
+    // 2. room_updated (complete 4-seat snapshot)
+    this.broadcastRoomUpdated(room.roomId);
+
+    // 3. If matchStarted: emit match_started -> game_state
+    if (matchStarted) {
+      this.triggerMatchStart(room);
+    }
+  }
+
+  /**
+   * Automatically triggers match start, deals cards, starts turn timer, and broadcasts masked state.
+   */
+  public triggerMatchStart(room: ActiveGameRoom): void {
+    if (!this.server) return;
+
+    this.server.to(room.roomId).emit('match_started', {
+      roomId: room.roomId,
+      gameMode: room.gameMode,
+      kingdomType: room.kingdomType,
+      firstTurnSeat: room.engine ? room.engine.getState().currentTurnSeat : 0,
+      currentTurnSeat: room.engine ? room.engine.getState().currentTurnSeat : 0,
+      kingdomIndex: 1,
+      kingdomOwnerSeat: room.engine ? room.engine.getActiveKingdom().ownerSeat : 0,
+      roomSequence: ++room.roomSequence,
+    });
+
+    this.startRoomTurnTimer(room);
+    this.broadcastMaskedState(room.roomId);
   }
 
   /**
@@ -168,6 +291,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       this.broadcastRoomUpdated(disconnected.roomId);
       this.broadcastMaskedState(disconnected.roomId);
     }
+
+    this.leaveAllSocketChannels(client);
+    this.socketToRooms.delete(client.id);
   }
 
   public broadcastRoomUpdated(roomId: string): void {
@@ -176,6 +302,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
     this.server.to(roomId).emit('room_updated', {
       roomId,
+      roomSequence: ++room.roomSequence,
       players: room.players
         .filter((p): p is ActivePlayer => p !== null)
         .map((p) => ({
@@ -185,6 +312,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           avatarUrl: p.avatarUrl,
           isHost: p.seat === 0,
           isReady: true,
+          isBot: false,
         })),
     });
   }
@@ -215,55 +343,20 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     const user = this.getUserFromSocket(client);
     const gameMode = data?.gameMode || 'SOLO';
     const kingdomType = data?.kingdomType || 'FREE_MERCY';
+    const allowBots = data?.allowBots ?? (!data?.isPrivate);
 
     // Leave any old room channel
-    const prevMapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (prevMapping) {
-      client.leave(prevMapping.room.roomId);
-      this.gameRoomService.leaveRoom(user.id, prevMapping.room.roomId);
-    }
+    this.leaveAllRoomsForSocket(client, user.id);
 
-    // If public room without password, check if there is an existing waiting public room
+    // If public room without password, check if there is an existing waiting public room matching criteria
     if (!data?.isPrivate && !data?.password) {
-      const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType);
+      const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType, allowBots);
       if (existingRoom) {
         const result = this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
-        client.join(existingRoom.roomId);
+        this.trackSocketRoom(client, existingRoom.roomId);
 
-        this.broadcastRoomUpdated(existingRoom.roomId);
-
-        if (result.matchStarted) {
-          this.server.to(existingRoom.roomId).emit('match_started', {
-            roomId: existingRoom.roomId,
-            gameMode: existingRoom.gameMode,
-            kingdomType: existingRoom.kingdomType,
-            firstTurnSeat: existingRoom.engine ? existingRoom.engine.getState().currentTurnSeat : 0,
-            kingdomIndex: 1,
-            kingdomOwnerSeat: existingRoom.engine ? existingRoom.engine.getActiveKingdom().ownerSeat : 0,
-          });
-          this.startRoomTurnTimer(existingRoom);
-          this.broadcastMaskedState(existingRoom.roomId);
-        } else {
-          this.server.to(existingRoom.roomId).emit('player_joined', {
-            roomId: existingRoom.roomId,
-            seat: result.seat,
-            user: {
-              id: user.id,
-              displayName: user.displayName,
-              avatarUrl: user.avatarUrl,
-              level: (user as any).level ?? 8,
-              coins: (user as any).coins ?? 2500,
-              stats: (user as any).stats ?? {
-                gamesPlayed: 30,
-                wins: 17,
-                losses: 13,
-                soloWins: 10,
-                teamWins: 7,
-                winRate: 56.7,
-              },
-            },
-          });
-        }
+        // BE-07 Strict sequential join emission
+        this.broadcastLobbyJoinSequence(existingRoom, result.seat, user, result.matchStarted);
 
         return {
           success: true,
@@ -286,10 +379,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       turnTime: data?.turnTime || 20,
       allowSpectators: data?.allowSpectators ?? true,
       isPrivate: data?.isPrivate ?? false,
-      allowBots: data?.allowBots ?? (!data?.isPrivate),
+      allowBots,
     });
 
-    client.join(room.roomId);
+    this.trackSocketRoom(client, room.roomId);
 
     // Immediately broadcast room_updated to the host so the lobby initializes
     this.broadcastRoomUpdated(room.roomId);
@@ -311,160 +404,126 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { roomIdOrCode: string; password?: string },
   ) {
-    const user = this.getUserFromSocket(client);
+    try {
+      if (!data?.roomIdOrCode) {
+        return {
+          success: false,
+          message: 'Room not found or expired',
+          code: 'ROOM_NOT_FOUND',
+        };
+      }
 
-    // Leave any old room channel
-    const prevMapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (prevMapping && prevMapping.room.roomId !== data.roomIdOrCode && prevMapping.room.roomCode !== data.roomIdOrCode?.toUpperCase()) {
-      client.leave(prevMapping.room.roomId);
-      this.gameRoomService.leaveRoom(user.id, prevMapping.room.roomId);
-    }
+      const user = this.getUserFromSocket(client);
 
-    const result = this.gameRoomService.joinRoom(
-      user,
-      client.id,
-      data.roomIdOrCode,
-      data.password,
-    );
+      // Leave any old room channel
+      this.leaveAllRoomsForSocket(client, user.id, data.roomIdOrCode);
 
-    client.join(result.room.roomId);
+      const result = this.gameRoomService.joinRoom(
+        user,
+        client.id,
+        data.roomIdOrCode,
+        data.password,
+      );
 
-    // Broadcast room_updated immediately
-    this.broadcastRoomUpdated(result.room.roomId);
+      this.trackSocketRoom(client, result.room.roomId);
 
-    if (result.matchStarted) {
-      // 4th player joined! Match starts automatically
-      this.server.to(result.room.roomId).emit('match_started', {
-        roomId: result.room.roomId,
-        gameMode: result.room.gameMode,
-        kingdomType: result.room.kingdomType,
-        firstTurnSeat: result.room.engine ? result.room.engine.getState().currentTurnSeat : 0,
-        kingdomIndex: 1,
-        kingdomOwnerSeat: result.room.engine ? result.room.engine.getActiveKingdom().ownerSeat : 0,
-      });
+      // BE-07 Strict sequential join sequence: player_joined -> room_updated -> match_started -> game_state
+      this.broadcastLobbyJoinSequence(result.room, result.seat, user, result.matchStarted);
 
-      // Start turn timer for Kingdom Owner
-      this.startRoomTurnTimer(result.room);
-      this.broadcastMaskedState(result.room.roomId);
-    } else {
-      // Inform lobby of new player
-      this.server.to(result.room.roomId).emit('player_joined', {
+      return {
+        success: true,
         roomId: result.room.roomId,
         seat: result.seat,
-        user: {
-          id: user.id,
-          displayName: user.displayName,
-          avatarUrl: user.avatarUrl,
-          level: (user as any).level ?? 8,
-          coins: (user as any).coins ?? 2500,
-          stats: (user as any).stats ?? {
-            gamesPlayed: 30,
-            wins: 17,
-            losses: 13,
-            soloWins: 10,
-            teamWins: 7,
-            winRate: 56.7,
-          },
-        },
-      });
-    }
+        matchStarted: result.matchStarted,
+      };
+    } catch (err: any) {
+      const msg = err.message || '';
+      let code = 'JOIN_ROOM_ERROR';
+      let message = msg;
 
-    return {
-      success: true,
-      roomId: result.room.roomId,
-      seat: result.seat,
-      matchStarted: result.matchStarted,
-    };
+      if (err instanceof NotFoundException || msg.toLowerCase().includes('not found') || msg.toLowerCase().includes('expired')) {
+        code = 'ROOM_NOT_FOUND';
+        message = 'Room not found or expired';
+      } else if (msg.toLowerCase().includes('full') || err instanceof ConflictException && msg.toLowerCase().includes('full')) {
+        code = 'ROOM_FULL';
+        message = 'Room is already full (4/4 players)';
+      } else if (msg.toLowerCase().includes('progress') || msg.toLowerCase().includes('already started') || msg.toLowerCase().includes('active')) {
+        code = 'MATCH_IN_PROGRESS';
+        message = 'Match already in progress';
+      } else if (msg.toLowerCase().includes('password') || err instanceof UnauthorizedException) {
+        code = 'INVALID_PASSWORD';
+        message = 'Invalid room password';
+      }
+
+      return {
+        success: false,
+        message,
+        code,
+      };
+    }
   }
 
   @SubscribeMessage('quick_play')
   async handleQuickPlay(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data?: { gameMode?: GameMode; kingdomType?: KingdomType },
+    @MessageBody() data?: { gameMode?: GameMode; kingdomType?: KingdomType; allowBots?: boolean },
   ) {
-    const user = this.getUserFromSocket(client);
-    const gameMode = data?.gameMode || 'SOLO';
-    const kingdomType = data?.kingdomType || 'FREE_MERCY';
+    try {
+      const user = this.getUserFromSocket(client);
+      const gameMode = data?.gameMode || 'SOLO';
+      const kingdomType = data?.kingdomType || 'FREE_MERCY';
+      const allowBots = data?.allowBots ?? true;
 
-    // Leave any old room channel
-    const prevMapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (prevMapping) {
-      client.leave(prevMapping.room.roomId);
-      this.gameRoomService.leaveRoom(user.id, prevMapping.room.roomId);
-    }
+      // Leave any old room channel
+      this.leaveAllRoomsForSocket(client, user.id);
 
-    // 1. Check for an open, non-private waiting room matching gameMode & kingdomType
-    const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType);
-    if (existingRoom) {
-      const result = this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
-      client.join(existingRoom.roomId);
+      // 1. Check for an open, non-private waiting room matching gameMode, kingdomType, and allowBots
+      const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType, allowBots);
+      if (existingRoom) {
+        const result = this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
+        this.trackSocketRoom(client, existingRoom.roomId);
 
-      this.broadcastRoomUpdated(existingRoom.roomId);
+        // BE-07 Strict sequential join emission
+        this.broadcastLobbyJoinSequence(existingRoom, result.seat, user, result.matchStarted);
 
-      if (result.matchStarted) {
-        this.server.to(existingRoom.roomId).emit('match_started', {
+        return {
+          success: true,
+          status: 'MATCHED',
           roomId: existingRoom.roomId,
-          gameMode: existingRoom.gameMode,
-          kingdomType: existingRoom.kingdomType,
-          firstTurnSeat: existingRoom.engine ? existingRoom.engine.getState().currentTurnSeat : 0,
-          kingdomIndex: 1,
-          kingdomOwnerSeat: existingRoom.engine ? existingRoom.engine.getActiveKingdom().ownerSeat : 0,
-        });
-        this.startRoomTurnTimer(existingRoom);
-        this.broadcastMaskedState(existingRoom.roomId);
-      } else {
-        this.server.to(existingRoom.roomId).emit('player_joined', {
-          roomId: existingRoom.roomId,
+          roomCode: existingRoom.roomCode,
           seat: result.seat,
-          user: {
-            id: user.id,
-            displayName: user.displayName,
-            avatarUrl: user.avatarUrl,
-            level: (user as any).level ?? 8,
-            coins: (user as any).coins ?? 2500,
-            stats: (user as any).stats ?? {
-              gamesPlayed: 30,
-              wins: 17,
-              losses: 13,
-              soloWins: 10,
-              teamWins: 7,
-              winRate: 56.7,
-            },
-          },
-        });
+          matchStarted: result.matchStarted,
+        };
       }
+
+      // 2. If no matching open room exists, spawn a default public room
+      const room = this.gameRoomService.createRoom(user, client.id, {
+        name: `${user.displayName}'s Room`,
+        gameMode,
+        kingdomType,
+        turnTime: 20,
+        isPrivate: false,
+        allowBots,
+      });
+
+      this.trackSocketRoom(client, room.roomId);
+      this.broadcastRoomUpdated(room.roomId);
 
       return {
         success: true,
-        status: 'MATCHED',
-        roomId: existingRoom.roomId,
-        roomCode: existingRoom.roomCode,
-        seat: result.seat,
-        matchStarted: result.matchStarted,
+        status: 'QUEUED',
+        roomId: room.roomId,
+        roomCode: room.roomCode,
+        seat: 0,
+        matchStarted: false,
+      };
+    } catch (err: any) {
+      this.logger.error(`quick_play failed: ${err.message}`, err.stack);
+      return {
+        success: false,
+        message: err.message || 'Quick play failed',
       };
     }
-
-    // 2. If no matching open room exists, spawn a default public room
-    const room = this.gameRoomService.createRoom(user, client.id, {
-      name: `${user.displayName}'s Room`,
-      gameMode,
-      kingdomType,
-      turnTime: 20,
-      isPrivate: false,
-      allowBots: true,
-    });
-
-    client.join(room.roomId);
-    this.broadcastRoomUpdated(room.roomId);
-
-    return {
-      success: true,
-      status: 'QUEUED',
-      roomId: room.roomId,
-      roomCode: room.roomCode,
-      seat: 0,
-      matchStarted: false,
-    };
   }
 
   @SubscribeMessage('join_queue')
@@ -472,24 +531,71 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     @ConnectedSocket() client: Socket,
     @MessageBody() data?: { gameMode?: GameMode; kingdomType?: KingdomType },
   ) {
-    return this.handleQuickPlay(client, data);
+    try {
+      const user = this.getUserFromSocket(client);
+      const gameMode = data?.gameMode || 'SOLO';
+      const kingdomType = data?.kingdomType || 'FREE_MERCY';
+
+      this.leaveAllRoomsForSocket(client, user.id);
+
+      let queueLength = 1;
+      if (this.matchmakingService) {
+        await this.matchmakingService.enqueue(user, client.id, gameMode, kingdomType);
+        const queueKey = this.matchmakingService.getQueueKey(gameMode, kingdomType);
+        queueLength = await this.matchmakingService.getQueueLength(queueKey);
+      } else {
+        const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType);
+        if (existingRoom) {
+          queueLength = existingRoom.players.filter((p) => p !== null).length + 1;
+          this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
+          this.trackSocketRoom(client, existingRoom.roomId);
+        } else {
+          const room = this.gameRoomService.createRoom(user, client.id, {
+            name: `${user.displayName}'s Queue`,
+            gameMode,
+            kingdomType,
+            turnTime: 20,
+            isPrivate: false,
+            allowBots: true,
+          });
+          this.trackSocketRoom(client, room.roomId);
+          queueLength = 1;
+        }
+      }
+
+      return { success: true, queueLength };
+    } catch (err: any) {
+      this.logger.error(`join_queue failed: ${err.message}`, err.stack);
+      return { success: false, message: err.message || 'Failed to join queue' };
+    }
   }
 
   @SubscribeMessage('leave_queue')
   async handleLeaveQueue(@ConnectedSocket() client: Socket) {
-    const user = this.getUserFromSocket(client);
-    if (this.matchmakingService) {
-      const dequeued = await this.matchmakingService.dequeue(user.id);
-      return { success: true, dequeued };
+    try {
+      const user = this.getUserFromSocket(client);
+
+      if (this.matchmakingService) {
+        await this.matchmakingService.dequeue(user.id);
+      }
+
+      const mapping = this.gameRoomService.findRoomBySocketId(client.id);
+      if (mapping && mapping.room.status === 'WAITING') {
+        if (this.botFillService) {
+          this.botFillService.cancelBackfill(mapping.room.roomId);
+        }
+        this.gameRoomService.leaveRoom(user.id, mapping.room.roomId);
+        client.leave(mapping.room.roomId);
+        this.broadcastRoomUpdated(mapping.room.roomId);
+      }
+
+      this.leaveAllRoomsForSocket(client, user.id);
+
+      return { success: true, message: 'Queue left successfully' };
+    } catch (err: any) {
+      this.logger.error(`leave_queue failed: ${err.message}`, err.stack);
+      return { success: false, message: err.message || 'Failed to leave queue' };
     }
-    const mapping = this.gameRoomService.findRoomBySocketId(client.id);
-    if (mapping && mapping.room.status === 'WAITING') {
-      this.gameRoomService.leaveRoom(user.id, mapping.room.roomId);
-      client.leave(mapping.room.roomId);
-      this.broadcastRoomUpdated(mapping.room.roomId);
-      return { success: true, dequeued: true };
-    }
-    return { success: true, dequeued: false };
   }
 
   @SubscribeMessage('reconnect_game')
@@ -511,7 +617,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       return { success: false, restored: false, message: 'No active seat found in room' };
     }
 
-    client.join(room.roomId);
+    this.trackSocketRoom(client, room.roomId);
 
     // Broadcast room_updated to other players showing opponent is back online
     this.broadcastRoomUpdated(room.roomId);
@@ -549,6 +655,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         turnId: room.turnId,
         stateVersion: room.stateVersion,
         turnDeadlineTimestamp: room.turnDeadlineTimestamp,
+        roomSequence: room.roomSequence,
+        serverTime: Date.now(),
+        deadlineAt: room.turnDeadlineTimestamp,
       });
 
       this.server.to(client.id).emit('game_state', snapshot);
@@ -561,6 +670,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       seat: result.seat,
       stateVersion: room.stateVersion,
       turnId: room.turnId,
+      roomSequence: room.roomSequence,
+      deadlineAt: room.turnDeadlineTimestamp ?? null,
     };
   }
 
@@ -568,7 +679,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   handleSelectContract(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: { roomId: string; contracts?: ContractType[]; contract?: ContractType },
+    data: { roomId: string; contracts?: ContractType[]; contract?: ContractType; actionId?: string },
   ) {
     const mapping = this.gameRoomService.findRoomBySocketId(client.id);
     if (!mapping || mapping.room.roomId !== data?.roomId) {
@@ -576,17 +687,32 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     }
 
     const contracts = data.contracts || (data.contract ? [data.contract] : []);
-    return this.executeSelectContract(data.roomId, mapping.seat, contracts);
+    return this.executeSelectContract(data.roomId, mapping.seat, contracts, data.actionId);
   }
 
   public executeSelectContract(
     roomId: string,
     seat: number,
     contracts: ContractType[],
+    actionId?: string,
   ) {
     const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
+    }
+
+    if (actionId) {
+      if (!room.processedActionIds) room.processedActionIds = new Map();
+      if (room.processedActionIds.has(actionId)) {
+        return {
+          success: true,
+          duplicate: true,
+          actionId,
+          roomSequence: room.roomSequence,
+          version: room.stateVersion,
+          ...room.processedActionIds.get(actionId),
+        };
+      }
     }
 
     const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
@@ -609,12 +735,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           affectedSeat: callOff.affectedSeat,
           turnId: room.turnId,
           stateVersion: room.stateVersion,
+          roomSequence: ++room.roomSequence,
         });
         this.broadcastMaskedState(room.roomId);
         return { success: true, isCalledOff: true, reason: callOff.reason };
       }
 
       const updatedState = room.engine.getState();
+
+      if (actionId) {
+        if (room.processedActionIds.size >= 50) {
+          const oldest = room.processedActionIds.keys().next().value;
+          if (oldest) room.processedActionIds.delete(oldest);
+        }
+        room.processedActionIds.set(actionId, { phase: updatedState.currentPhase });
+      }
 
       if (updatedState.currentPhase === 'DOUBLING_PHASE') {
         const durationSeconds = 8;
@@ -625,9 +760,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           roomId: room.roomId,
           durationSeconds: 8,
           deadlineTimestamp,
+          deadlineAt: deadlineTimestamp,
           activeContracts: updatedState.activeContracts,
           turnId: room.turnId,
           stateVersion: room.stateVersion,
+          roomSequence: ++room.roomSequence,
         });
 
         // 8-second doubling countdown timer
@@ -639,6 +776,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
               ...tick,
               turnId: room.turnId,
               stateVersion: room.stateVersion,
+              roomSequence: ++room.roomSequence,
+              serverTime: Date.now(),
+              deadlineAt: tick.deadlineTimestamp,
             });
           },
           (doublingRoomId) => {
@@ -658,7 +798,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       }
 
       this.broadcastMaskedState(room.roomId);
-      return { success: true, phase: updatedState.currentPhase, version: room.stateVersion };
+      return {
+        success: true,
+        phase: updatedState.currentPhase,
+        version: room.stateVersion,
+        actionId,
+        roomSequence: room.roomSequence,
+      };
     } catch (err: any) {
       return { success: false, message: err.message };
     }
@@ -667,25 +813,47 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   @SubscribeMessage('declare_double')
   handleDeclareDouble(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; card: Card },
+    @MessageBody() data: { roomId: string; card: Card; actionId?: string },
   ) {
     const mapping = this.gameRoomService.findRoomBySocketId(client.id);
     if (!mapping || mapping.room.roomId !== data?.roomId) {
       return { success: false, code: 'UNAUTHORIZED_ROOM', message: 'Unauthorized room or seat' };
     }
 
-    return this.executeDeclareDouble(data.roomId, mapping.seat, data.card);
+    return this.executeDeclareDouble(data.roomId, mapping.seat, data.card, data.actionId);
   }
 
-  public executeDeclareDouble(roomId: string, seat: number, card: Card) {
+  public executeDeclareDouble(roomId: string, seat: number, card: Card, actionId?: string) {
     const room = this.gameRoomService.getRoom(roomId);
     if (!room || !room.engine) {
       return { success: false, message: 'Active game not found' };
     }
 
+    if (actionId) {
+      if (!room.processedActionIds) room.processedActionIds = new Map();
+      if (room.processedActionIds.has(actionId)) {
+        return {
+          success: true,
+          duplicate: true,
+          actionId,
+          roomSequence: room.roomSequence,
+          version: room.stateVersion,
+          ...room.processedActionIds.get(actionId),
+        };
+      }
+    }
+
     try {
       room.engine.doubleCard(seat, card);
       room.stateVersion++;
+
+      if (actionId) {
+        if (room.processedActionIds.size >= 50) {
+          const oldest = room.processedActionIds.keys().next().value;
+          if (oldest) room.processedActionIds.delete(oldest);
+        }
+        room.processedActionIds.set(actionId, { card });
+      }
 
       this.server.to(room.roomId).emit('card_doubled', {
         roomId: room.roomId,
@@ -693,10 +861,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         card,
         turnId: room.turnId,
         stateVersion: room.stateVersion,
+        roomSequence: ++room.roomSequence,
       });
 
       this.broadcastMaskedState(room.roomId);
-      return { success: true, version: room.stateVersion };
+      return { success: true, version: room.stateVersion, actionId, roomSequence: room.roomSequence };
     } catch (err: any) {
       return { success: false, message: err.message };
     }
@@ -750,8 +919,24 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
     room.isProcessingAction = true;
     try {
-      // Idempotency check: Cache last 10 processed actionIds per seat
+      // Idempotency check: LRU map and per-seat action history
       if (options?.actionId) {
+        if (!room.processedActionIds) room.processedActionIds = new Map();
+        if (room.processedActionIds.has(options.actionId)) {
+          this.logger.log(
+            `Duplicate actionId ${options.actionId} for seat ${seat} in room ${roomId}. Returning cached ack.`,
+          );
+          return {
+            success: true,
+            duplicate: true,
+            actionId: options.actionId,
+            roomSequence: room.roomSequence,
+            version: room.stateVersion,
+            turnId: room.turnId,
+            ...room.processedActionIds.get(options.actionId),
+          };
+        }
+
         const seatActions = room.actionHistory.get(seat) || [];
         if (seatActions.includes(options.actionId)) {
           this.logger.log(
@@ -760,6 +945,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           return {
             success: true,
             duplicate: true,
+            actionId: options.actionId,
+            roomSequence: room.roomSequence,
             version: room.stateVersion,
             turnId: room.turnId,
           };
@@ -834,6 +1021,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         const result = room.engine.playTrickCard(seat, card);
         room.stateVersion++;
 
+        if (options?.actionId) {
+          if (room.processedActionIds.size >= 50) {
+            const oldest = room.processedActionIds.keys().next().value;
+            if (oldest) room.processedActionIds.delete(oldest);
+          }
+          room.processedActionIds.set(options.actionId, { card, seat });
+        }
+
         if (result.trickCompleted) {
           this.roomTimerService.stopTimer(room.roomId);
           const trickDuration = Date.now() - actionStart;
@@ -852,6 +1047,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
             displayDurationMs: 1500,
             turnId: room.turnId,
             stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
           });
 
           // Broadcast masked state with the 4 cards on the table
@@ -875,6 +1071,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           return {
             success: true,
             card,
+            actionId: options?.actionId,
+            roomSequence: room.roomSequence,
             version: room.stateVersion,
             turnId: room.turnId,
             result,
@@ -887,6 +1085,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           return {
             success: true,
             card,
+            actionId: options?.actionId,
+            roomSequence: room.roomSequence,
             version: room.stateVersion,
             turnId: room.turnId,
             result,
@@ -913,6 +1113,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         const result = room.engine.playTrixCard(seat, card);
         room.stateVersion++;
 
+        if (options?.actionId) {
+          if (room.processedActionIds.size >= 50) {
+            const oldest = room.processedActionIds.keys().next().value;
+            if (oldest) room.processedActionIds.delete(oldest);
+          }
+          room.processedActionIds.set(options.actionId, { card, seat });
+        }
+
         if (result.isContractOver) {
           this.handleContractEnd(room, result.scores);
         } else {
@@ -924,6 +1132,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         return {
           success: true,
           card,
+          actionId: options?.actionId,
+          roomSequence: room.roomSequence,
           version: room.stateVersion,
           turnId: room.turnId,
           result,
@@ -974,13 +1184,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       return { success: false, message: 'Active game not found' };
     }
 
-    // Idempotency check
+    // Idempotency check: LRU map and per-seat action history
     if (options?.actionId) {
+      if (!room.processedActionIds) room.processedActionIds = new Map();
+      if (room.processedActionIds.has(options.actionId)) {
+        return {
+          success: true,
+          duplicate: true,
+          actionId: options.actionId,
+          roomSequence: room.roomSequence,
+          version: room.stateVersion,
+          turnId: room.turnId,
+          ...room.processedActionIds.get(options.actionId),
+        };
+      }
+
       const seatActions = room.actionHistory.get(seat) || [];
       if (seatActions.includes(options.actionId)) {
         return {
           success: true,
           duplicate: true,
+          actionId: options.actionId,
+          roomSequence: room.roomSequence,
           version: room.stateVersion,
           turnId: room.turnId,
         };
@@ -1020,11 +1245,20 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       room.stateVersion++;
       room.turnId++;
 
+      if (options?.actionId) {
+        if (room.processedActionIds.size >= 50) {
+          const oldestKey = room.processedActionIds.keys().next().value;
+          if (oldestKey) room.processedActionIds.delete(oldestKey);
+        }
+        room.processedActionIds.set(options.actionId, { passed: true });
+      }
+
       this.server.to(room.roomId).emit('auto_passed', {
         roomId: room.roomId,
         seat,
         turnId: room.turnId,
         stateVersion: room.stateVersion,
+        roomSequence: ++room.roomSequence,
       });
 
       this.startRoomTurnTimer(room);
@@ -1034,6 +1268,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         success: true,
         turnId: room.turnId,
         version: room.stateVersion,
+        actionId: options?.actionId,
+        roomSequence: room.roomSequence,
       };
     } catch (err: any) {
       return { success: false, message: err.message };
@@ -1064,6 +1300,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           ...tick,
           turnId: room.turnId,
           stateVersion: room.stateVersion,
+          roomSequence: ++room.roomSequence,
+          serverTime: Date.now(),
+          deadlineAt: tick.deadlineTimestamp,
         });
       },
       (roomId, timeoutSeat) => {
@@ -1096,6 +1335,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
             phase: 'TRIX_PLAY',
             turnId: room.turnId,
             stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
           });
 
           if (res.isContractOver) {
@@ -1114,6 +1354,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
             seat,
             turnId: room.turnId,
             stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
           });
           this.startRoomTurnTimer(room);
         }
@@ -1134,6 +1375,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
             phase: 'TRICK_PLAY',
             turnId: room.turnId,
             stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
           });
 
           if (res.trickCompleted) {
@@ -1149,6 +1391,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
               displayDurationMs: 1500,
               turnId: room.turnId,
               stateVersion: room.stateVersion,
+              roomSequence: ++room.roomSequence,
             });
 
             this.broadcastMaskedState(room.roomId);
@@ -1189,6 +1432,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       nextPhase: state.currentPhase,
       turnId: room.turnId,
       stateVersion: room.stateVersion,
+      roomSequence: ++room.roomSequence,
     });
 
     if (state.currentPhase === 'GAME_OVER') {
@@ -1197,6 +1441,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         finalScores: state.scores,
         turnId: room.turnId,
         stateVersion: room.stateVersion,
+        roomSequence: ++room.roomSequence,
       });
 
       // Keep DB operations completely outside the hot path
@@ -1252,6 +1497,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           turnId: room.turnId,
           stateVersion: room.stateVersion,
           turnDeadlineTimestamp: room.turnDeadlineTimestamp,
+          roomSequence: room.roomSequence,
+          serverTime: Date.now(),
+          deadlineAt: room.turnDeadlineTimestamp ?? null,
         });
 
         this.server.to(player.socketId).emit('game_state', sanitized);

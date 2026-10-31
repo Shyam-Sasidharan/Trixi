@@ -62,8 +62,10 @@ export interface ActiveGameRoom {
   engine: TrixEngine | null;
   turnId: number;
   stateVersion: number;
+  roomSequence: number;
   turnDeadlineTimestamp: number | null;
   actionHistory: Map<number, string[]>;
+  processedActionIds: Map<string, any>;
   isProcessingAction?: boolean;
 }
 
@@ -79,11 +81,16 @@ export class GameRoomService {
   private onRoomCreatedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
   private onRoomDestroyedCallbacks: ((roomId: string) => void)[] = [];
   private onPlayerJoinedCallbacks: ((room: ActiveGameRoom, seat: number, isBot: boolean) => void)[] = [];
+  private onMatchStartedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
 
   constructor(private readonly prisma: PrismaService) {}
 
   public onRoomCreated(cb: (room: ActiveGameRoom) => void): void {
     this.onRoomCreatedCallbacks.push(cb);
+  }
+
+  public onMatchStarted(cb: (room: ActiveGameRoom) => void): void {
+    this.onMatchStartedCallbacks.push(cb);
   }
 
   public onRoomDestroyed(cb: (roomId: string) => void): void {
@@ -171,8 +178,10 @@ export class GameRoomService {
       engine: null,
       turnId: 1,
       stateVersion: 1,
+      roomSequence: 0,
       turnDeadlineTimestamp: null,
       actionHistory: new Map(),
+      processedActionIds: new Map(),
     };
 
     this.rooms.set(roomId, room);
@@ -210,12 +219,12 @@ export class GameRoomService {
     }
 
     if (room.status === 'FINISHED' || room.status === 'CANCELLED') {
-      throw new BadRequestException('This room is no longer active');
+      throw new BadRequestException('Room not found or expired');
     }
 
     // Password validation if private
     if (room.password && room.password !== password) {
-      throw new UnauthorizedException('Incorrect room password');
+      throw new UnauthorizedException('Invalid room password');
     }
 
     // Check if user is already seated in this room
@@ -238,6 +247,11 @@ export class GameRoomService {
     const openSeat = room.players.findIndex((p) => p === null);
     if (openSeat === -1) {
       throw new ConflictException('Room is full (maximum 4 players allowed)');
+    }
+
+    // Check if match already in progress for a new player
+    if (room.status === 'IN_PROGRESS') {
+      throw new ConflictException('Match already in progress');
     }
 
     const newPlayer: ActivePlayer = {
@@ -313,6 +327,7 @@ export class GameRoomService {
   public findWaitingPublicRoom(
     gameMode: GameMode,
     kingdomType: KingdomType,
+    allowBots?: boolean,
   ): ActiveGameRoom | null {
     for (const room of this.rooms.values()) {
       if (
@@ -320,7 +335,8 @@ export class GameRoomService {
         !room.password &&
         room.status === 'WAITING' &&
         room.gameMode === gameMode &&
-        room.kingdomType === kingdomType
+        room.kingdomType === kingdomType &&
+        (allowBots === undefined || room.allowBots === allowBots)
       ) {
         const hasOpenSeat = room.players.some((p) => p === null);
         if (hasOpenSeat) {

@@ -63,6 +63,9 @@ export interface SanitizedPlayerGameState {
   turnId?: number;
   stateVersion?: number;
   turnDeadlineTimestamp?: number | null;
+  roomSequence?: number;
+  serverTime?: number;
+  deadlineAt?: number | null;
 }
 
 export class PlayerViewSerializer {
@@ -80,6 +83,9 @@ export class PlayerViewSerializer {
       turnId?: number;
       stateVersion?: number;
       turnDeadlineTimestamp?: number | null;
+      roomSequence?: number;
+      serverTime?: number;
+      deadlineAt?: number | null;
     },
   ): SanitizedPlayerGameState {
     if (targetSeat < 0 || targetSeat > 3) {
@@ -201,6 +207,9 @@ export class PlayerViewSerializer {
       turnId: options?.turnId ?? 1,
       stateVersion: options?.stateVersion ?? 1,
       turnDeadlineTimestamp: options?.turnDeadlineTimestamp ?? null,
+      roomSequence: options?.roomSequence ?? 0,
+      serverTime: options?.serverTime ?? Date.now(),
+      deadlineAt: options?.deadlineAt !== undefined ? options.deadlineAt : (options?.turnDeadlineTimestamp ?? null),
     };
   }
 }

@@ -1,6 +1,6 @@
-import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { GameRoomService, ActiveGameRoom } from '../game-room/services/game-room.service.js';
-import type { GameGateway } from '../game-room/game.gateway.js';
+import { GameGateway } from '../game-room/game.gateway.js';
 import { BotPersona, getRandomBotPersonas } from './bot-persona.data.js';
 
 export interface BackfillOptions {
@@ -13,11 +13,13 @@ export interface BackfillOptions {
 export class BotFillService {
   private readonly logger = new Logger(BotFillService.name);
   private backfillTimers: Map<string, NodeJS.Timeout[]> = new Map();
-  private gateway?: GameGateway;
 
   constructor(
     @Inject(forwardRef(() => GameRoomService))
     private readonly gameRoomService: GameRoomService,
+    @Optional()
+    @Inject(forwardRef(() => GameGateway))
+    private gateway?: GameGateway,
   ) {
     if (this.gameRoomService && typeof this.gameRoomService.onRoomCreated === 'function') {
       this.gameRoomService.onRoomCreated((room: ActiveGameRoom) => {
@@ -209,11 +211,27 @@ export class BotFillService {
 
     // Broadcast WebSocket events if Gateway is connected
     if (this.gateway) {
-      if (typeof this.gateway.broadcastRoomUpdated === 'function') {
-        this.gateway.broadcastRoomUpdated(room.roomId);
+      if (typeof (this.gateway as any).broadcastLobbyJoinSequence === 'function') {
+        (this.gateway as any).broadcastLobbyJoinSequence(room, result.seat, botUser, result.matchStarted);
       } else if (this.gateway.server) {
+        // Fallback for mocked gateway in unit tests
+        this.gateway.server.to(room.roomId).emit('player_joined', {
+          roomId: room.roomId,
+          seat: result.seat,
+          roomSequence: ++room.roomSequence,
+          user: {
+            id: persona.id,
+            displayName: persona.displayName,
+            avatarUrl: persona.avatarUrl,
+            level: persona.level,
+            coins: persona.coins,
+            stats: persona.stats,
+          },
+        });
+
         this.gateway.server.to(room.roomId).emit('room_updated', {
           roomId: room.roomId,
+          roomSequence: ++room.roomSequence,
           players: room.players
             .filter((p: any) => p !== null)
             .map((p: any) => ({
@@ -223,37 +241,26 @@ export class BotFillService {
               avatarUrl: p.avatarUrl,
               isHost: p.seat === 0,
               isReady: true,
+              isBot: false,
             })),
         });
-      }
 
-      if (this.gateway.server) {
         if (result.matchStarted) {
-          // As soon as Seat 3 (the 4th player) is filled:
-          // Instantiates TrixEngine match & deals cards (in joinRoom)
-          // Emit match_started and dispatch broadcastMaskedState(roomId)
+          const ownerSeat = room.engine ? room.engine.getActiveKingdom().ownerSeat : 0;
+          const currentTurn = room.engine ? room.engine.getState().currentTurnSeat : 0;
           this.gateway.server.to(room.roomId).emit('match_started', {
             roomId: room.roomId,
             gameMode: room.gameMode,
             kingdomType: room.kingdomType,
+            firstTurnSeat: currentTurn,
+            currentTurnSeat: currentTurn,
+            kingdomIndex: 1,
+            kingdomOwnerSeat: ownerSeat,
+            roomSequence: ++room.roomSequence,
           });
 
           this.gateway.startRoomTurnTimer(room);
           this.gateway.broadcastMaskedState(room.roomId);
-        } else {
-          // Never send isBot: true
-          this.gateway.server.to(room.roomId).emit('player_joined', {
-            roomId: room.roomId,
-            seat: result.seat,
-            user: {
-              id: persona.id,
-              displayName: persona.displayName,
-              avatarUrl: persona.avatarUrl,
-              level: persona.level,
-              coins: persona.coins,
-              stats: persona.stats,
-            },
-          });
         }
       }
     }

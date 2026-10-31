@@ -6,6 +6,8 @@ export interface TimerTickEvent {
   phase: string;
   seat?: number;
   deadlineTimestamp: number;
+  deadlineAt?: number;
+  serverTime?: number;
   turnId?: number;
 }
 
@@ -46,6 +48,8 @@ export class RoomTimerService {
       phase: 'TURN',
       seat,
       deadlineTimestamp,
+      deadlineAt: deadlineTimestamp,
+      serverTime: Date.now(),
       turnId,
     });
 
@@ -77,6 +81,8 @@ export class RoomTimerService {
           phase: 'TURN',
           seat,
           deadlineTimestamp,
+          deadlineAt: deadlineTimestamp,
+          serverTime: Date.now(),
           turnId,
         });
       }
@@ -113,6 +119,8 @@ export class RoomTimerService {
       remainingSeconds: durationSeconds,
       phase: 'DOUBLING',
       deadlineTimestamp,
+      deadlineAt: deadlineTimestamp,
+      serverTime: Date.now(),
     });
 
     const interval = setInterval(() => {
@@ -142,6 +150,8 @@ export class RoomTimerService {
           remainingSeconds,
           phase: 'DOUBLING',
           deadlineTimestamp,
+          deadlineAt: deadlineTimestamp,
+          serverTime: Date.now(),
         });
       }
     }, 1000);
