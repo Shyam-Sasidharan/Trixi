@@ -96,6 +96,7 @@ describe('[P0/P1] Multiplayer Stabilization & Action Plan Verification', () => {
 
     expect(resolvedBotFill).toBeDefined();
     expect(resolvedGateway).toBeDefined();
+    expect(resolvedBotFill.getGateway()).toBeDefined();
   });
 
   it('BE-01 & BE-07: Auto-trigger match start & dealt hand broadcast with strict sequential order', () => {
