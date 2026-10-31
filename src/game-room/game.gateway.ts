@@ -22,7 +22,7 @@ import { JwtService } from '@nestjs/jwt';
 import { GameRoomService, ActiveGameRoom, ActivePlayer } from './services/game-room.service.js';
 import { RoomTimerService, TimerTickEvent } from './services/room-timer.service.js';
 import { PlayerViewSerializer, PlayerSeatInfo } from './serializers/player-view.serializer.js';
-import { ContractType, GameMode, KingdomType } from '../game-engine/types/contract.types.js';
+import { ALL_CONTRACTS, ContractType, GameMode, KingdomType } from '../game-engine/types/contract.types.js';
 import { Card } from '../game-engine/types/card.types.js';
 import { TrickEngine } from '../game-engine/trick-engine.js';
 import { TrixContract } from '../game-engine/contracts/trix.contract.js';
@@ -1397,7 +1397,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     if (kingdom.ownerSeat !== ownerSeat) return;
 
     const available = ALL_CONTRACTS.filter(
-      (c) => !kingdom.consumedContracts.includes(c),
+      (c: ContractType) => !kingdom.consumedContracts.includes(c),
     );
     if (available.length === 0) return;
 
