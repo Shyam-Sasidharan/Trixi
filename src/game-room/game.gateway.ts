@@ -62,7 +62,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   private socketToRooms: Map<string, Set<string>> = new Map();
 
   constructor(
-    private readonly gameRoomService: GameRoomService,
+    public readonly gameRoomService: GameRoomService,
     private readonly roomTimerService: RoomTimerService,
     private readonly jwtService: JwtService,
     @Optional()
@@ -82,6 +82,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     if (this.gameRoomService && typeof this.gameRoomService.onMatchStarted === 'function') {
       this.gameRoomService.onMatchStarted((room) => {
         this.triggerMatchStart(room);
+      });
+    }
+
+    if (this.gameRoomService && typeof this.gameRoomService.onRoomDestroyed === 'function') {
+      this.gameRoomService.onRoomDestroyed((roomId) => {
+        this.roomTimerService.stopTimer(roomId);
+        this.botActionService?.cancelPendingActions(roomId);
       });
     }
   }
@@ -899,7 +906,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     roomId: string,
     seat: number,
     card: Card,
-    options?: { actionId?: string; clientVersion?: number; turnId?: number },
+    options?: { actionId?: string; clientVersion?: number; turnId?: number; isAutoPlay?: boolean },
   ) {
     const actionStart = Date.now();
     const room = this.gameRoomService.getRoom(roomId);
@@ -1029,6 +1036,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           room.processedActionIds.set(options.actionId, { card, seat });
         }
 
+        if (options?.isAutoPlay) {
+          this.server.to(room.roomId).emit('auto_played', {
+            roomId: room.roomId,
+            seat,
+            card,
+            phase: 'TRICK_PLAY',
+            turnId: room.turnId,
+            stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
+          });
+        }
+
         if (result.trickCompleted) {
           this.roomTimerService.stopTimer(room.roomId);
           const trickDuration = Date.now() - actionStart;
@@ -1049,6 +1068,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
             stateVersion: room.stateVersion,
             roomSequence: ++room.roomSequence,
           });
+
+          // Release action lock before broadcasting state so downstream handlers aren't blocked
+          room.isProcessingAction = false;
 
           // Broadcast masked state with the 4 cards on the table
           this.broadcastMaskedState(room.roomId);
@@ -1081,6 +1103,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           // Pass turn to next player in trick
           room.turnId++;
           this.startRoomTurnTimer(room);
+
+          // Release action lock before broadcasting state
+          room.isProcessingAction = false;
+
           this.broadcastMaskedState(room.roomId);
           return {
             success: true,
@@ -1121,12 +1147,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           room.processedActionIds.set(options.actionId, { card, seat });
         }
 
+        if (options?.isAutoPlay) {
+          this.server.to(room.roomId).emit('auto_played', {
+            roomId: room.roomId,
+            seat,
+            card,
+            phase: 'TRIX_PLAY',
+            turnId: room.turnId,
+            stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
+          });
+        }
+
         if (result.isContractOver) {
           this.handleContractEnd(room, result.scores);
         } else {
           room.turnId++;
           this.startRoomTurnTimer(room);
         }
+
+        // Release action lock before broadcasting state
+        room.isProcessingAction = false;
 
         this.broadcastMaskedState(room.roomId);
         return {
@@ -1314,6 +1355,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
 
   /**
    * Auto-plays lowest legal card or passes on turn timeout.
+   * Delegates directly to authoritative executePlayCard / executePassTrix pipeline.
    */
   public handleTurnTimeout(room: ActiveGameRoom, seat: number): void {
     if (!room.engine) return;
@@ -1325,95 +1367,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       if (state.currentPhase === 'TRIX_PLAY') {
         const card = this.gameRoomService.getFallbackCardToPlay(room, seat);
         if (card) {
-          const res = room.engine.playTrixCard(seat, card);
-          room.stateVersion++;
-
-          this.server.to(room.roomId).emit('auto_played', {
-            roomId: room.roomId,
-            seat,
-            card,
-            phase: 'TRIX_PLAY',
-            turnId: room.turnId,
-            stateVersion: room.stateVersion,
-            roomSequence: ++room.roomSequence,
-          });
-
-          if (res.isContractOver) {
-            this.handleContractEnd(room, res.scores);
-          } else {
-            room.turnId++;
-            this.startRoomTurnTimer(room);
-          }
+          this.executePlayCard(room.roomId, seat, card, { isAutoPlay: true });
         } else {
-          room.engine.passTrixTurn(seat);
-          room.stateVersion++;
-          room.turnId++;
-
-          this.server.to(room.roomId).emit('auto_passed', {
-            roomId: room.roomId,
-            seat,
-            turnId: room.turnId,
-            stateVersion: room.stateVersion,
-            roomSequence: ++room.roomSequence,
-          });
-          this.startRoomTurnTimer(room);
+          this.executePassTrix(room.roomId, seat);
         }
-        this.broadcastMaskedState(room.roomId);
         return;
       }
 
       if (state.currentPhase === 'TRICK_PLAY') {
         const card = this.gameRoomService.getFallbackCardToPlay(room, seat);
         if (card) {
-          const res = room.engine.playTrickCard(seat, card);
-          room.stateVersion++;
-
-          this.server.to(room.roomId).emit('auto_played', {
-            roomId: room.roomId,
-            seat,
-            card,
-            phase: 'TRICK_PLAY',
-            turnId: room.turnId,
-            stateVersion: room.stateVersion,
-            roomSequence: ++room.roomSequence,
-          });
-
-          if (res.trickCompleted) {
-            this.roomTimerService.stopTimer(room.roomId);
-
-            this.server.to(room.roomId).emit('trick_completed', {
-              roomId: room.roomId,
-              trickCards: res.trickCards,
-              trickWinnerSeat: res.trickWinner,
-              winnerSeat: res.trickWinner,
-              nextTurnSeat: res.trickWinner,
-              roundScores: room.engine.getState().scores,
-              displayDurationMs: 1500,
-              turnId: room.turnId,
-              stateVersion: room.stateVersion,
-              roomSequence: ++room.roomSequence,
-            });
-
-            this.broadcastMaskedState(room.roomId);
-
-            setTimeout(() => {
-              if (!room.engine) return;
-              const advance = room.engine.clearTrickAndAdvance(res.trickWinner!);
-              room.turnId++;
-              room.stateVersion++;
-
-              if (advance.contractEnded) {
-                this.handleContractEnd(room, advance.scores);
-              } else {
-                this.startRoomTurnTimer(room);
-              }
-              this.broadcastMaskedState(room.roomId);
-            }, 1500);
-          } else {
-            room.turnId++;
-            this.startRoomTurnTimer(room);
-            this.broadcastMaskedState(room.roomId);
-          }
+          this.executePlayCard(room.roomId, seat, card, { isAutoPlay: true });
         }
       }
     } catch (err: any) {
@@ -1436,6 +1400,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     });
 
     if (state.currentPhase === 'GAME_OVER') {
+      this.botActionService?.cancelPendingActions(room.roomId);
+
       this.server.to(room.roomId).emit('game_over', {
         roomId: room.roomId,
         finalScores: state.scores,

@@ -152,7 +152,7 @@ export class BotBrainService {
 
     // Evaluate Queens
     if (activeContracts.includes('QUEENS')) {
-      const queens = botHand.filter((c) => c.rank === 'Q');
+      const queens = botHand.filter((c) => c.rank === 'Q' && !c.isDoubled);
       for (const queen of queens) {
         const lowerCount = botHand.filter(
           (c) => c.suit === queen.suit && c.power < 12,
@@ -165,7 +165,7 @@ export class BotBrainService {
 
     // Evaluate King of Hearts
     if (activeContracts.includes('KING_OF_HEARTS')) {
-      const koh = botHand.find((c) => c.suit === 'HEARTS' && c.rank === 'K');
+      const koh = botHand.find((c) => c.suit === 'HEARTS' && c.rank === 'K' && !c.isDoubled);
       if (koh) {
         const otherHearts = botHand.filter(
           (c) => c.suit === 'HEARTS' && c.rank !== 'K',
