@@ -104,42 +104,64 @@ export class BotBrainService {
    * Lower score = safer.
    */
   private evaluateContractDanger(contract: ContractType, hand: Card[]): number {
+    // Void suit advantage: being void in suits allows early sloughing of danger cards
+    const voidCount = (['HEARTS', 'DIAMONDS', 'CLUBS', 'SPADES'] as Suit[]).filter(
+      (s) => !hand.some((c) => c.suit === s),
+    ).length;
+
+    let danger = 50;
     switch (contract) {
       case 'KING_OF_HEARTS': {
         const hasKoh = hand.some((c) => c.suit === 'HEARTS' && c.rank === 'K');
         if (!hasKoh) return 0; // Extremely safe if bot doesn't hold K♥
         const heartsCount = hand.filter((c) => c.suit === 'HEARTS').length;
         // Holding K♥ with few hearts is suicidal; with 5+ hearts it's somewhat protected
-        return heartsCount >= 5 ? 30 : 80;
+        danger = heartsCount >= 5 ? 30 : 80;
+        break;
       }
 
       case 'QUEENS': {
         const queens = hand.filter((c) => c.rank === 'Q');
-        if (queens.length === 0) return 5;
-        let danger = 0;
+        if (queens.length === 0) return Math.max(0, 5 - voidCount * 2);
+        danger = 0;
         for (const q of queens) {
           const lowerCount = hand.filter(
             (c) => c.suit === q.suit && c.power < 12,
           ).length;
           danger += lowerCount >= 3 ? 15 : 35;
         }
-        return danger;
+        break;
       }
 
       case 'DIAMONDS': {
         const diamonds = hand.filter((c) => c.suit === 'DIAMONDS');
         const highDiamonds = diamonds.filter((c) => c.power >= 12);
-        return diamonds.length * 3 + highDiamonds.length * 8;
+        danger = diamonds.length * 3 + highDiamonds.length * 8;
+        break;
       }
 
       case 'HANDS': {
         const highCards = hand.filter((c) => c.power >= 11);
-        return highCards.length * 4;
+        danger = highCards.length * 4;
+        break;
       }
 
       default:
-        return 50;
+        danger = 50;
     }
+
+    return Math.max(0, danger - voidCount * 8);
+  }
+
+  /**
+   * Computes the single best legal card to play for the bot (alias for decideCardToPlay).
+   */
+  public pickBestCard(
+    botHand: Card[],
+    gameState: MatchState,
+    botSeat: number,
+  ): Card {
+    return this.decideCardToPlay(botHand, gameState, botSeat);
   }
 
   /**

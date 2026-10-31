@@ -79,12 +79,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     if (this.botFillService) this.botFillService.setGateway(this);
     if (this.matchmakingService) this.matchmakingService.setGateway(this);
 
-    if (this.gameRoomService && typeof this.gameRoomService.onMatchStarted === 'function') {
-      this.gameRoomService.onMatchStarted((room) => {
-        this.triggerMatchStart(room);
-      });
-    }
-
     if (this.gameRoomService && typeof this.gameRoomService.onRoomDestroyed === 'function') {
       this.gameRoomService.onRoomDestroyed((roomId) => {
         this.roomTimerService.stopTimer(roomId);
@@ -554,8 +548,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         const existingRoom = this.gameRoomService.findWaitingPublicRoom(gameMode, kingdomType);
         if (existingRoom) {
           queueLength = existingRoom.players.filter((p) => p !== null).length + 1;
-          this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
+          const result = this.gameRoomService.joinRoom(user, client.id, existingRoom.roomId);
           this.trackSocketRoom(client, existingRoom.roomId);
+          this.broadcastLobbyJoinSequence(existingRoom, result.seat, user, result.matchStarted);
         } else {
           const room = this.gameRoomService.createRoom(user, client.id, {
             name: `${user.displayName}'s Queue`,
@@ -731,7 +726,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     }
 
     try {
-      const callOff = room.engine.selectContracts(contracts);
+      const callOff = this.gameRoomService.selectContract(room.roomId, seat, contracts);
       room.stateVersion++;
       room.turnId++;
 
@@ -1025,7 +1020,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         );
 
         // Update authoritative state immediately
-        const result = room.engine.playTrickCard(seat, card);
+        const result = this.gameRoomService.playCard(room.roomId, seat, card) as {
+          trickCompleted: boolean;
+          trickWinner?: number;
+          contractEnded?: boolean;
+          scores?: Record<number, number>;
+          winningCard?: Card;
+          trickCards?: { seat: number; card: Card }[];
+        };
         room.stateVersion++;
 
         if (options?.actionId) {
@@ -1136,7 +1138,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           `[VALIDATED] Room: ${roomId}, Turn: ${room.turnId}, Version: ${room.stateVersion}, Duration: ${validateDuration}ms, Card: ${card.rank}${card.suit}`,
         );
 
-        const result = room.engine.playTrixCard(seat, card);
+        const result = this.gameRoomService.playCard(room.roomId, seat, card) as {
+          finishedOrder: number[];
+          isContractOver: boolean;
+          scores?: Record<number, number>;
+        };
         room.stateVersion++;
 
         if (options?.actionId) {
@@ -1282,7 +1288,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     }
 
     try {
-      room.engine.passTrixTurn(seat);
+      this.gameRoomService.passTrix(room.roomId, seat);
       room.stateVersion++;
       room.turnId++;
 
@@ -1318,11 +1324,37 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   }
 
   /**
-   * Starts countdown timer for the active turn seat.
+   * Starts countdown timer for the active turn seat or kingdom selection owner.
    */
   public startRoomTurnTimer(room: ActiveGameRoom): void {
     if (!room.engine) return;
     const state = room.engine.getState();
+
+    if (state.currentPhase === 'KINGDOM_SELECTION') {
+      const kingdom = room.engine.getActiveKingdom();
+      const ownerSeat = kingdom.ownerSeat;
+      const durationSeconds = 15;
+
+      room.turnDeadlineTimestamp = this.roomTimerService.startKingdomSelectionTimer(
+        room.roomId,
+        ownerSeat,
+        durationSeconds,
+        (tick) => {
+          this.server.to(room.roomId).emit('timer_tick', {
+            ...tick,
+            turnId: room.turnId,
+            stateVersion: room.stateVersion,
+            roomSequence: ++room.roomSequence,
+            serverTime: Date.now(),
+            deadlineAt: tick.deadlineTimestamp,
+          });
+        },
+        (roomId, timeoutSeat) => {
+          this.handleKingdomSelectionTimeout(room, timeoutSeat);
+        },
+      );
+      return;
+    }
 
     if (state.currentPhase !== 'TRICK_PLAY' && state.currentPhase !== 'TRIX_PLAY') {
       this.roomTimerService.stopTimer(room.roomId);
@@ -1351,6 +1383,44 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       },
       room.turnId,
     );
+  }
+
+  /**
+   * Auto-selects contract on kingdom selection timeout to guarantee the room never deadlocks.
+   */
+  public handleKingdomSelectionTimeout(room: ActiveGameRoom, ownerSeat: number): void {
+    if (!room.engine) return;
+    const state = room.engine.getState();
+    if (state.currentPhase !== 'KINGDOM_SELECTION') return;
+
+    const kingdom = room.engine.getActiveKingdom();
+    if (kingdom.ownerSeat !== ownerSeat) return;
+
+    const available = ALL_CONTRACTS.filter(
+      (c) => !kingdom.consumedContracts.includes(c),
+    );
+    if (available.length === 0) return;
+
+    let chosenContracts: ContractType[] = [];
+    if (room.kingdomType === 'CRAZY_COMPLEX') {
+      const canChooseTrix = available.includes('TRIX');
+      const canChooseNegatives = ['QUEENS', 'KING_OF_HEARTS', 'DIAMONDS', 'HANDS'].every((c: any) => available.includes(c));
+      if (canChooseTrix) {
+        chosenContracts = ['TRIX'];
+      } else if (canChooseNegatives) {
+        chosenContracts = ['QUEENS', 'KING_OF_HEARTS', 'DIAMONDS', 'HANDS'];
+      } else {
+        chosenContracts = [available[0]];
+      }
+    } else {
+      chosenContracts = [available[0]];
+    }
+
+    this.logger.log(
+      `Kingdom selection timed out for seat ${ownerSeat} in room ${room.roomId}. Auto-selecting [${chosenContracts.join(', ')}]`,
+    );
+
+    this.executeSelectContract(room.roomId, ownerSeat, chosenContracts);
   }
 
   /**
@@ -1478,6 +1548,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     );
 
     // Trigger AI automation for any active bot seat
-    this.botActionService?.evaluateAndTrigger(room);
+    if (state.currentPhase === 'KINGDOM_SELECTION') {
+      const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
+      if (room.players[ownerSeat]?.isBot) {
+        this.botActionService?.handleBotTurn(room.roomId, ownerSeat);
+      }
+    } else if (state.currentPhase === 'TRICK_PLAY' || state.currentPhase === 'TRIX_PLAY') {
+      const turnSeat = state.currentTurnSeat;
+      if (room.players[turnSeat]?.isBot) {
+        this.botActionService?.handleBotTurn(room.roomId, turnSeat);
+      }
+    } else {
+      this.botActionService?.evaluateAndTrigger(room);
+    }
   }
 }

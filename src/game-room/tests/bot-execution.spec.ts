@@ -261,4 +261,128 @@ describe('Bot Execution Pipeline & Unification Integration Tests', () => {
       expect.objectContaining({ rank: 'Q' }),
     );
   });
+
+  it('should automatically select contract within 2000ms when a bot holds 7♥ and is kingdom owner', async () => {
+    const s0 = createMockSocket('s0', 'u0', 'HumanHost');
+    const roomRes = gateway.handleCreateRoom(s0, {
+      name: '7H Bot Room',
+      gameMode: 'SOLO',
+      kingdomType: 'FREE_MERCY',
+      turnTime: 20,
+      isPrivate: false,
+      allowBots: true,
+    });
+
+    const room = roomService.getRoom(roomRes.roomId)!;
+    botFillService.populateRoomWithBots(room.roomId, true);
+
+    const state = room.engine!.getState();
+    const ownerSeat = room.engine!.getActiveKingdom().ownerSeat;
+
+    // Ensure the 7♥ owner is a bot
+    room.players[ownerSeat]!.isBot = true;
+
+    const selectContractSpy = vi.spyOn(gateway, 'executeSelectContract');
+
+    // Trigger handleBotTurn for the owner bot
+    botActionService.handleBotTurn(room.roomId, ownerSeat);
+
+    // 0ms delay: should NOT have executed yet (natural human thinking delay)
+    expect(selectContractSpy).not.toHaveBeenCalled();
+
+    // Advance 2000ms: bot thinking timer expires and chooses contract
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(selectContractSpy).toHaveBeenCalledWith(
+      room.roomId,
+      ownerSeat,
+      expect.any(Array),
+    );
+
+    // The phase must have transitioned from KINGDOM_SELECTION
+    expect(['DOUBLING_PHASE', 'TRICK_PLAY', 'TRIX_PLAY']).toContain(
+      room.engine!.getState().currentPhase,
+    );
+  });
+
+  it('should auto-select fallback contract on 15s timeout expiry if owner does not act in KINGDOM_SELECTION', async () => {
+    const s0 = createMockSocket('s0', 'u0', 'HumanHost');
+    const roomRes = gateway.handleCreateRoom(s0, {
+      name: 'Timeout Selection Room',
+      gameMode: 'SOLO',
+      kingdomType: 'FREE_MERCY',
+      turnTime: 20,
+    });
+
+    const room = roomService.getRoom(roomRes.roomId)!;
+    roomService.joinRoom({ id: 'u1', displayName: 'P1' } as any, 's1', room.roomId);
+    roomService.joinRoom({ id: 'u2', displayName: 'P2' } as any, 's2', room.roomId);
+    roomService.joinRoom({ id: 'u3', displayName: 'P3' } as any, 's3', room.roomId);
+
+    // Ensure game is initialized in KINGDOM_SELECTION
+    expect(room.engine!.getState().currentPhase).toBe('KINGDOM_SELECTION');
+    const ownerSeat = room.engine!.getActiveKingdom().ownerSeat;
+
+    const selectSpy = vi.spyOn(gateway, 'executeSelectContract');
+
+    // Start turn timer (starts 15s kingdom selection countdown)
+    gateway.startRoomTurnTimer(room);
+
+    // Advance time past 15s timeout (15.5 seconds)
+    await vi.advanceTimersByTimeAsync(15500);
+
+    // Automatic server-side fallback must have selected a contract
+    expect(selectSpy).toHaveBeenCalledWith(
+      room.roomId,
+      ownerSeat,
+      expect.any(Array),
+    );
+
+    // Room must have advanced out of KINGDOM_SELECTION
+    expect(room.engine!.getState().currentPhase).not.toBe('KINGDOM_SELECTION');
+  });
+
+  it('should automatically play legal card via handleBotTurn when turn rotates to a bot in TRICK_PLAY', async () => {
+    const s0 = createMockSocket('s0', 'u0', 'HumanHost');
+    const roomRes = gateway.handleCreateRoom(s0, {
+      name: 'Trick Bot Room',
+      gameMode: 'SOLO',
+      kingdomType: 'FREE_MERCY',
+      turnTime: 20,
+      isPrivate: false,
+      allowBots: true,
+    });
+
+    const room = roomService.getRoom(roomRes.roomId)!;
+    botFillService.populateRoomWithBots(room.roomId, true);
+
+    // Force contract to HANDS
+    room.engine!.selectContracts(['HANDS']);
+    const state = room.engine!.getState();
+    expect(state.currentPhase).toBe('TRICK_PLAY');
+
+    const turnSeat = state.currentTurnSeat;
+    room.players[turnSeat]!.isBot = true;
+
+    const playSpy = vi.spyOn(gateway, 'executePlayCard');
+
+    // Call handleBotTurn directly
+    botActionService.handleBotTurn(room.roomId, turnSeat);
+
+    // 0ms: no immediate play
+    expect(playSpy).not.toHaveBeenCalled();
+
+    // Advance 1600ms (natural 800ms-1500ms play latency)
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(playSpy).toHaveBeenCalledWith(
+      room.roomId,
+      turnSeat,
+      expect.objectContaining({
+        suit: expect.any(String),
+        rank: expect.anything(),
+        power: expect.any(Number),
+      }),
+    );
+  });
 });

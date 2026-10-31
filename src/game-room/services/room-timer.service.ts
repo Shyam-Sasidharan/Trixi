@@ -101,6 +101,76 @@ export class RoomTimerService {
   }
 
   /**
+   * Starts an authoritative kingdom selection countdown timer (default 15 seconds).
+   */
+  public startKingdomSelectionTimer(
+    roomId: string,
+    ownerSeat: number,
+    durationSeconds: number,
+    onTick: (event: TimerTickEvent) => void,
+    onTimeout: (roomId: string, ownerSeat: number) => void,
+  ): number {
+    this.stopTimer(roomId);
+
+    const deadlineTimestamp = Date.now() + durationSeconds * 1000;
+    let expired = false;
+
+    onTick({
+      roomId,
+      remainingSeconds: durationSeconds,
+      phase: 'KINGDOM_SELECTION',
+      seat: ownerSeat,
+      deadlineTimestamp,
+      deadlineAt: deadlineTimestamp,
+      serverTime: Date.now(),
+    });
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const remainingSeconds = Math.max(0, Math.ceil((deadlineTimestamp - now) / 1000));
+
+      if (now >= deadlineTimestamp || remainingSeconds <= 0) {
+        if (!expired) {
+          expired = true;
+          this.stopTimer(roomId);
+          try {
+            onTimeout(roomId, ownerSeat);
+          } catch (err: any) {
+            this.logger.error(
+              `Error in kingdom selection timeout callback for room ${roomId}: ${err.message}`,
+              err.stack,
+            );
+          }
+        }
+      } else {
+        const timerObj = this.timers.get(roomId);
+        if (timerObj) {
+          timerObj.remainingSeconds = remainingSeconds;
+        }
+        onTick({
+          roomId,
+          remainingSeconds,
+          phase: 'KINGDOM_SELECTION',
+          seat: ownerSeat,
+          deadlineTimestamp,
+          deadlineAt: deadlineTimestamp,
+          serverTime: Date.now(),
+        });
+      }
+    }, 1000);
+
+    this.timers.set(roomId, {
+      interval,
+      remainingSeconds: durationSeconds,
+      phase: 'KINGDOM_SELECTION',
+      seat: ownerSeat,
+      deadlineTimestamp,
+    });
+
+    return deadlineTimestamp;
+  }
+
+  /**
    * Starts an authoritative doubling phase timer (default 8 seconds).
    */
   public startDoublingTimer(

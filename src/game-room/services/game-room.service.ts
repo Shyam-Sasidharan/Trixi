@@ -515,6 +515,51 @@ export class GameRoomService {
   }
 
   /**
+   * Helper to check if a specific seat is occupied by an AI Bot.
+   */
+  public isBot(room: ActiveGameRoom, seat: number): boolean {
+    return room.players[seat]?.isBot === true;
+  }
+
+  /**
+   * Authoritative contract selection on room engine.
+   */
+  public selectContract(roomId: string, seat: number, contracts: ContractType[]) {
+    const room = this.getRoom(roomId);
+    if (!room || !room.engine) throw new Error('Active game not found');
+    const kingdom = room.engine.getActiveKingdom();
+    if (kingdom.ownerSeat !== seat) {
+      throw new Error(`Only Kingdom Owner (Seat ${kingdom.ownerSeat}) can select contract`);
+    }
+    return room.engine.selectContracts(contracts);
+  }
+
+  /**
+   * Authoritative card play submission on room engine.
+   */
+  public playCard(roomId: string, seat: number, card: Card) {
+    const room = this.getRoom(roomId);
+    if (!room || !room.engine) throw new Error('Active game not found');
+    const state = room.engine.getState();
+    if (state.currentPhase === 'TRICK_PLAY') {
+      return room.engine.playTrickCard(seat, card);
+    }
+    if (state.currentPhase === 'TRIX_PLAY') {
+      return room.engine.playTrixCard(seat, card);
+    }
+    throw new Error(`Cannot play card in phase: ${state.currentPhase}`);
+  }
+
+  /**
+   * Authoritative turn pass for Trix shedding mode.
+   */
+  public passTrix(roomId: string, seat: number) {
+    const room = this.getRoom(roomId);
+    if (!room || !room.engine) throw new Error('Active game not found');
+    return room.engine.passTrixTurn(seat);
+  }
+
+  /**
    * Fallback bot auto-play: selects the lowest legal card for a turn timeout or disconnected bot.
    */
   public getFallbackCardToPlay(room: ActiveGameRoom, seat: number): Card | null {
