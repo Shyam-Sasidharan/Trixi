@@ -9,7 +9,7 @@ import {
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { TrixEngine } from '../../game-engine/trix-engine.js';
-import { Card } from '../../game-engine/types/card.types.js';
+import { Card, RANK_POWERS } from '../../game-engine/types/card.types.js';
 import {
   ContractType,
   GameMode,
@@ -82,6 +82,7 @@ export class GameRoomService {
   private onRoomDestroyedCallbacks: ((roomId: string) => void)[] = [];
   private onPlayerJoinedCallbacks: ((room: ActiveGameRoom, seat: number, isBot: boolean) => void)[] = [];
   private onMatchStartedCallbacks: ((room: ActiveGameRoom) => void)[] = [];
+  private onKingdomSelectionCallbacks: ((room: ActiveGameRoom, ownerSeat: number) => void)[] = [];
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -91,6 +92,20 @@ export class GameRoomService {
 
   public onMatchStarted(cb: (room: ActiveGameRoom) => void): void {
     this.onMatchStartedCallbacks.push(cb);
+  }
+
+  public onKingdomSelection(cb: (room: ActiveGameRoom, ownerSeat: number) => void): void {
+    this.onKingdomSelectionCallbacks.push(cb);
+  }
+
+  public notifyKingdomSelection(room: ActiveGameRoom, ownerSeat: number): void {
+    for (const cb of this.onKingdomSelectionCallbacks) {
+      try {
+        cb(room, ownerSeat);
+      } catch (err: any) {
+        this.logger.warn(`Error in onKingdomSelection callback: ${err.message}`);
+      }
+    }
   }
 
   public onRoomDestroyed(cb: (roomId: string) => void): void {
@@ -541,11 +556,16 @@ export class GameRoomService {
     const room = this.getRoom(roomId);
     if (!room || !room.engine) throw new Error('Active game not found');
     const state = room.engine.getState();
+    // Server-authoritative card power sanitization: never trust client-sent power
+    const authoritativeCard: Card = {
+      ...card,
+      power: RANK_POWERS[card.rank] ?? card.power,
+    };
     if (state.currentPhase === 'TRICK_PLAY') {
-      return room.engine.playTrickCard(seat, card);
+      return room.engine.playTrickCard(seat, authoritativeCard);
     }
     if (state.currentPhase === 'TRIX_PLAY') {
-      return room.engine.playTrixCard(seat, card);
+      return room.engine.playTrixCard(seat, authoritativeCard);
     }
     throw new Error(`Cannot play card in phase: ${state.currentPhase}`);
   }

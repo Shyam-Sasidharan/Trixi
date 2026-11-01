@@ -1,5 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import type { GameGateway } from '../game-room/game.gateway.js';
+import { ModuleRef } from '@nestjs/core';
+import { GameGateway } from '../game-room/game.gateway.js';
 import { GameRoomService, type ActiveGameRoom, type ActivePlayer } from '../game-room/services/game-room.service.js';
 import { BotBrainService } from './bot-brain.service.js';
 import { ALL_CONTRACTS } from '../game-engine/types/contract.types.js';
@@ -18,10 +19,28 @@ export class BotActionService {
     private readonly botBrainService: BotBrainService,
     @Optional()
     private readonly gameRoomService?: GameRoomService,
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
 
   public setGateway(gateway: GameGateway): void {
     this.gateway = gateway;
+  }
+
+  public getGateway(): GameGateway | undefined {
+    if (this.gateway) return this.gateway;
+    if (this.moduleRef) {
+      try {
+        const gw = this.moduleRef.get(GameGateway, { strict: false });
+        if (gw) {
+          this.gateway = gw;
+          return gw;
+        }
+      } catch (err: any) {
+        this.logger.debug(`Could not resolve GameGateway via moduleRef: ${err.message}`);
+      }
+    }
+    return undefined;
   }
 
   public setTestMode(enabled: boolean): void {
@@ -33,15 +52,27 @@ export class BotActionService {
       const r = this.gameRoomService.getRoom(roomId);
       if (r) return r;
     }
-    if (this.gateway?.gameRoomService) {
-      const r = this.gateway.gameRoomService.getRoom(roomId);
+    const gateway = this.getGateway();
+    if (gateway?.gameRoomService) {
+      const r = gateway.gameRoomService.getRoom(roomId);
       if (r) return r;
     }
     return fallbackRoom;
   }
 
   private getRoomService(): GameRoomService | undefined {
-    return this.gameRoomService || this.gateway?.gameRoomService;
+    return this.gameRoomService || this.getGateway()?.gameRoomService;
+  }
+
+  /**
+   * Explicit handler for bot kingdom selection (Issue BE-2).
+   */
+  public handleKingdomSelection(roomId: string, seat: number): void {
+    const room = this.getRoom(roomId);
+    if (!room || room.status !== 'IN_PROGRESS' || !room.engine) return;
+    const player = room.players[seat];
+    if (!player || !player.isBot) return;
+    this.executeBotKingdomSelection(room, seat, player);
   }
 
   /**
@@ -162,19 +193,20 @@ export class BotActionService {
 
     const timer = setTimeout(() => {
       this.pendingActionTimers.delete(actionKey);
-      if (!this.gateway) return;
+      const gateway = this.getGateway();
+      if (!gateway) return;
 
       const latestRoom = this.getRoom(room.roomId, room);
       if (!latestRoom || !latestRoom.engine || latestRoom.status !== 'IN_PROGRESS') return;
       if (latestRoom.engine.getState().currentPhase !== 'KINGDOM_SELECTION') return;
 
-      const res = this.gateway.executeSelectContract(room.roomId, seat, chosenContracts);
+      const res = gateway.executeSelectContract(room.roomId, seat, chosenContracts);
       if (res && !res.success) {
         this.logger.warn(
           `Bot contract selection failed: ${res.message}. Falling back to first available contract...`,
         );
         if (available.length > 0) {
-          this.gateway.executeSelectContract(room.roomId, seat, [available[0]]);
+          gateway.executeSelectContract(room.roomId, seat, [available[0]]);
         }
       }
     }, delay);
@@ -215,13 +247,14 @@ export class BotActionService {
 
         const timer = setTimeout(() => {
           this.pendingActionTimers.delete(actionKey);
-          if (!this.gateway) return;
+          const gateway = this.getGateway();
+          if (!gateway) return;
 
           const latestRoom = this.getRoom(room.roomId, room);
           if (!latestRoom || !latestRoom.engine || latestRoom.status !== 'IN_PROGRESS') return;
           if (latestRoom.engine.getState().currentPhase !== 'DOUBLING_PHASE') return;
 
-          const res = this.gateway.executeDeclareDouble(room.roomId, seat, card);
+          const res = gateway.executeDeclareDouble(room.roomId, seat, card);
           if (res && !res.success) {
             this.logger.warn(`Bot ${player.displayName} (Seat ${seat}) declare double failed: ${res.message}`);
           }
@@ -295,7 +328,8 @@ export class BotActionService {
 
     const timer = setTimeout(() => {
       this.pendingActionTimers.delete(actionKey);
-      if (!this.gateway) return;
+      const gateway = this.getGateway();
+      if (!gateway) return;
 
       const latestRoom = this.getRoom(room.roomId, room);
       if (!latestRoom || !latestRoom.engine || latestRoom.status !== 'IN_PROGRESS') return;
@@ -304,7 +338,7 @@ export class BotActionService {
         return;
       }
 
-      const res = this.gateway.executePlayCard(room.roomId, seat, chosenCard);
+      const res = gateway.executePlayCard(room.roomId, seat, chosenCard);
 
       if (res && !res.success) {
         this.logger.warn(
@@ -314,8 +348,9 @@ export class BotActionService {
         if (res.code === 'ACTION_IN_PROGRESS') {
           const retryTimer = setTimeout(() => {
             this.pendingActionTimers.delete(actionKey);
-            if (!this.gateway) return;
-            const retryRes = this.gateway.executePlayCard(room.roomId, seat, chosenCard);
+            const retryGateway = this.getGateway();
+            if (!retryGateway) return;
+            const retryRes = retryGateway.executePlayCard(room.roomId, seat, chosenCard);
             if (retryRes && !retryRes.success) {
               this.fallbackPlay(latestRoom, seat, player.displayName);
             }
@@ -371,7 +406,8 @@ export class BotActionService {
 
       const timer = setTimeout(() => {
         this.pendingActionTimers.delete(actionKey);
-        if (!this.gateway) return;
+        const gateway = this.getGateway();
+        if (!gateway) return;
 
         const latestRoom = this.getRoom(room.roomId, room);
         if (!latestRoom || !latestRoom.engine || latestRoom.status !== 'IN_PROGRESS') return;
@@ -384,7 +420,7 @@ export class BotActionService {
           this.scheduleOneCardAnnouncement(room.roomId, seat, player.displayName);
         }
 
-        const res = this.gateway.executePlayCard(room.roomId, seat, chosenCard);
+        const res = gateway.executePlayCard(room.roomId, seat, chosenCard);
 
         if (res && !res.success) {
           this.logger.warn(
@@ -393,8 +429,9 @@ export class BotActionService {
           if (res.code === 'ACTION_IN_PROGRESS') {
             const retryTimer = setTimeout(() => {
               this.pendingActionTimers.delete(actionKey);
-              if (!this.gateway) return;
-              const retryRes = this.gateway.executePlayCard(room.roomId, seat, chosenCard);
+              const retryGateway = this.getGateway();
+              if (!retryGateway) return;
+              const retryRes = retryGateway.executePlayCard(room.roomId, seat, chosenCard);
               if (retryRes && !retryRes.success) {
                 this.fallbackTrix(latestRoom, seat, player.displayName);
               }
@@ -417,7 +454,8 @@ export class BotActionService {
 
       const timer = setTimeout(() => {
         this.pendingActionTimers.delete(actionKey);
-        if (!this.gateway) return;
+        const gateway = this.getGateway();
+        if (!gateway) return;
 
         const latestRoom = this.getRoom(room.roomId, room);
         if (!latestRoom || !latestRoom.engine || latestRoom.status !== 'IN_PROGRESS') return;
@@ -426,7 +464,7 @@ export class BotActionService {
           return;
         }
 
-        const res = this.gateway.executePassTrix(room.roomId, seat);
+        const res = gateway.executePassTrix(room.roomId, seat);
         if (res && !res.success) {
           this.logger.error(`Bot ${player.displayName} (Seat ${seat}) Trix pass failed: ${res.message}`);
         }
@@ -437,7 +475,8 @@ export class BotActionService {
   }
 
   private fallbackPlay(room: ActiveGameRoom, seat: number, displayName: string): void {
-    if (!this.gateway) return;
+    const gateway = this.getGateway();
+    if (!gateway) return;
     const roomService = this.getRoomService();
     const fallbackCard = roomService?.getFallbackCardToPlay(room, seat);
     if (fallbackCard) {
@@ -445,7 +484,7 @@ export class BotActionService {
         `Bot ${displayName} (Seat ${seat}) executing fallback legal trick card: ${fallbackCard.rank}${fallbackCard.suit}`,
       );
       const actionId = `bot_${room.roomId}_${seat}_fallback_${Date.now()}`;
-      this.gateway.executePlayCard(room.roomId, seat, fallbackCard, {
+      gateway.executePlayCard(room.roomId, seat, fallbackCard, {
         actionId,
         isAutoPlay: true,
       });
@@ -453,7 +492,8 @@ export class BotActionService {
   }
 
   private fallbackTrix(room: ActiveGameRoom, seat: number, displayName: string): void {
-    if (!this.gateway) return;
+    const gateway = this.getGateway();
+    if (!gateway) return;
     const roomService = this.getRoomService();
     const fallbackCard = roomService?.getFallbackCardToPlay(room, seat);
     if (fallbackCard) {
@@ -461,14 +501,14 @@ export class BotActionService {
         `Bot ${displayName} (Seat ${seat}) executing fallback Trix card: ${fallbackCard.rank}${fallbackCard.suit}`,
       );
       const actionId = `bot_${room.roomId}_${seat}_fallback_${Date.now()}`;
-      this.gateway.executePlayCard(room.roomId, seat, fallbackCard, {
+      gateway.executePlayCard(room.roomId, seat, fallbackCard, {
         actionId,
         isAutoPlay: true,
       });
     } else {
       this.logger.log(`Bot ${displayName} (Seat ${seat}) falling back to pass in Trix`);
       const actionId = `bot_${room.roomId}_${seat}_fallback_pass_${Date.now()}`;
-      this.gateway.executePassTrix(room.roomId, seat, { actionId });
+      gateway.executePassTrix(room.roomId, seat, { actionId });
     }
   }
 
@@ -519,8 +559,9 @@ export class BotActionService {
     const actionKey = `${roomId}:one_card:${seat}`;
     const timer = setTimeout(() => {
       this.pendingActionTimers.delete(actionKey);
-      if (this.gateway && this.gateway.server) {
-        this.gateway.server.to(roomId).emit('one_card_announcement', {
+      const gateway = this.getGateway();
+      if (gateway && gateway.server) {
+        gateway.server.to(roomId).emit('one_card_announcement', {
           roomId,
           seat,
           displayName,

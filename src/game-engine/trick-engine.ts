@@ -1,4 +1,4 @@
-import { Card, Suit } from './types/card.types.js';
+import { Card, RANK_POWERS, Suit } from './types/card.types.js';
 import { ContractType, GameMode, KingdomType } from './types/contract.types.js';
 import { CollectedTrick, Trick } from './types/engine.types.js';
 import { DoublingManager } from './doubling.js';
@@ -96,12 +96,16 @@ export class TrickEngine {
     const leadSuit = trick.leadSuit;
     let winningCard = trick.cards[0].card;
     let winnerSeat = trick.cards[0].seat;
+    let maxPower = RANK_POWERS[winningCard.rank] ?? winningCard.power;
 
     for (let i = 1; i < trick.cards.length; i++) {
       const { seat, card } = trick.cards[i];
-      if (card.suit === leadSuit && card.power > winningCard.power) {
+      // Server-authoritative card power calculation: never trust client-sent card.power
+      const cardPower = RANK_POWERS[card.rank] ?? card.power;
+      if (card.suit === leadSuit && cardPower > maxPower) {
         winningCard = card;
         winnerSeat = seat;
+        maxPower = cardPower;
       }
     }
 

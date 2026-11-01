@@ -385,4 +385,74 @@ describe('Bot Execution Pipeline & Unification Integration Tests', () => {
       }),
     );
   });
+
+  it('BE-1 & BE-2: Automatic broadcast of match_started/game_state and autonomous bot 7♥ kingdom selection without reconnect polling', async () => {
+    const s0 = createMockSocket('s0-human', 'u0-human', 'HumanPlayer');
+
+    // Human creates room with allowBots: true
+    const roomRes = gateway.handleCreateRoom(s0, {
+      name: 'BE-1 Auto Match',
+      gameMode: 'SOLO',
+      kingdomType: 'FREE_MERCY',
+      turnTime: 20,
+      isPrivate: false,
+      allowBots: true,
+    });
+    const roomId = roomRes.roomId;
+    const room = roomService.getRoom(roomId)!;
+
+    emittedEvents = [];
+
+    // Simulate 3 bots backfilled
+    botFillService.populateRoomWithBots(roomId, true);
+
+    // 1. BE-1 Verification: Verify match_started and game_state automatically emitted
+    expect(room.status).toBe('IN_PROGRESS');
+    const eventNames = emittedEvents.map((e) => e.event);
+    expect(eventNames).toContain('match_started');
+    expect(eventNames).toContain('game_state');
+
+    // Verify game_state payload includes non-null deadlineAt for kingdom selection
+    const gameStateEvent = emittedEvents.find((e) => e.event === 'game_state');
+    expect(gameStateEvent).toBeDefined();
+    expect(gameStateEvent!.payload.deadlineAt).toBeGreaterThan(Date.now());
+    expect(gameStateEvent!.payload.turnDeadlineTimestamp).toBeGreaterThan(Date.now());
+
+    // 2. BE-2 Verification: Bot Kingdom Owner automatically selects contract within 2000ms
+    const ownerSeat = room.engine!.getActiveKingdom().ownerSeat;
+    if (ownerSeat !== 0) {
+      expect(room.players[ownerSeat]!.isBot).toBe(true);
+
+      const selectSpy = vi.spyOn(gateway, 'executeSelectContract');
+
+      // Advance timers by 2000ms to allow bot thinking delay to expire
+      await vi.advanceTimersByTimeAsync(2000);
+
+      // Verify bot selected contract autonomously
+      expect(selectSpy).toHaveBeenCalledWith(
+        roomId,
+        ownerSeat,
+        expect.any(Array),
+      );
+      expect(room.engine!.getState().currentPhase).not.toBe('KINGDOM_SELECTION');
+    }
+  });
+
+  it('BE-4: Server Authoritative Card Power - Client forged power is completely overridden by RANK_POWERS', () => {
+    // 4 cards in trick: Seat 0 plays 4♥ forged with power: 99; Seat 1 plays A♥ with power: 14
+    const trick: any = {
+      leadSuit: 'HEARTS',
+      cards: [
+        { seat: 0, card: { id: 'c1', suit: 'HEARTS', rank: 4, power: 99 } },
+        { seat: 1, card: { id: 'c2', suit: 'HEARTS', rank: 'A', power: 14 } },
+        { seat: 2, card: { id: 'c3', suit: 'HEARTS', rank: 2, power: 2 } },
+        { seat: 3, card: { id: 'c4', suit: 'HEARTS', rank: 3, power: 3 } },
+      ],
+    };
+
+    // Winner must be Seat 1 (Ace of Hearts), NOT Seat 0 (forged 4 of Hearts)
+    const result = TrickEngine.determineWinner(trick);
+    expect(result.winnerSeat).toBe(1);
+    expect(result.winningCard.rank).toBe('A');
+  });
 });

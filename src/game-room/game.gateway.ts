@@ -17,7 +17,9 @@ import {
   NotFoundException,
   ConflictException,
   UnauthorizedException,
+  OnModuleInit,
 } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { GameRoomService, ActiveGameRoom, ActivePlayer } from './services/game-room.service.js';
 import { RoomTimerService, TimerTickEvent } from './services/room-timer.service.js';
@@ -53,7 +55,7 @@ interface SocketUser {
   connectTimeout: 20000,
   maxHttpBufferSize: 1e6,
 })
-export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
+export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, OnModuleInit {
   @WebSocketServer()
   server!: Server;
 
@@ -67,29 +69,75 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     private readonly jwtService: JwtService,
     @Optional()
     @Inject(forwardRef(() => BotActionService))
-    private readonly botActionService?: BotActionService,
+    private botActionService?: BotActionService,
     @Optional()
     @Inject(forwardRef(() => BotFillService))
-    private readonly botFillService?: BotFillService,
+    private botFillService?: BotFillService,
     @Optional()
     @Inject(forwardRef(() => MatchmakingService))
     private readonly matchmakingService?: MatchmakingService,
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {
-    if (this.botActionService) this.botActionService.setGateway(this);
-    if (this.botFillService) this.botFillService.setGateway(this);
-    if (this.matchmakingService) this.matchmakingService.setGateway(this);
+    if (this.botActionService && typeof this.botActionService.setGateway === 'function') {
+      this.botActionService.setGateway(this);
+    }
+    if (this.botFillService && typeof this.botFillService.setGateway === 'function') {
+      this.botFillService.setGateway(this);
+    }
+    if (this.matchmakingService && typeof this.matchmakingService.setGateway === 'function') {
+      this.matchmakingService.setGateway(this);
+    }
 
     if (this.gameRoomService && typeof this.gameRoomService.onRoomDestroyed === 'function') {
       this.gameRoomService.onRoomDestroyed((roomId) => {
         this.roomTimerService.stopTimer(roomId);
-        this.botActionService?.cancelPendingActions(roomId);
+        this.getBotActionService()?.cancelPendingActions(roomId);
+      });
+    }
+  }
+
+  public getBotActionService(): BotActionService | undefined {
+    if ((!this.botActionService || typeof this.botActionService.handleBotTurn !== 'function') && this.moduleRef) {
+      try {
+        const resolved = this.moduleRef.get(BotActionService, { strict: false });
+        if (resolved) this.botActionService = resolved;
+      } catch {}
+    }
+    return this.botActionService;
+  }
+
+  public getBotFillService(): BotFillService | undefined {
+    if ((!this.botFillService || typeof this.botFillService.populateRoomWithBots !== 'function') && this.moduleRef) {
+      try {
+        const resolved = this.moduleRef.get(BotFillService, { strict: false });
+        if (resolved) this.botFillService = resolved;
+      } catch {}
+    }
+    return this.botFillService;
+  }
+
+  onModuleInit() {
+    const bas = this.getBotActionService();
+    if (bas) bas.setGateway(this);
+    const bfs = this.getBotFillService();
+    if (bfs) bfs.setGateway(this);
+    if (this.matchmakingService) this.matchmakingService.setGateway(this);
+
+    if (this.gameRoomService && typeof this.gameRoomService.onKingdomSelection === 'function') {
+      this.gameRoomService.onKingdomSelection((room, ownerSeat) => {
+        if (room.players[ownerSeat]?.isBot) {
+          this.getBotActionService()?.handleKingdomSelection(room.roomId, ownerSeat);
+        }
       });
     }
   }
 
   afterInit(server: Server) {
-    if (this.botActionService) this.botActionService.setGateway(this);
-    if (this.botFillService) this.botFillService.setGateway(this);
+    const bas = this.getBotActionService();
+    if (bas) bas.setGateway(this);
+    const bfs = this.getBotFillService();
+    if (bfs) bfs.setGateway(this);
     if (this.matchmakingService) this.matchmakingService.setGateway(this);
   }
 
@@ -245,36 +293,51 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         const secret =
           process.env.JWT_SECRET || 'trix-secret-key-change-in-production';
         const payload = await this.jwtService.verifyAsync(token, { secret });
+        const verifiedUserId = payload.sub || payload.id;
         client.data.user = {
-          id: payload.sub,
-          email: payload.email || `${payload.phoneNumber || payload.sub}@trix.local`,
+          id: verifiedUserId,
+          email: payload.email || `${payload.phoneNumber || verifiedUserId}@trix.local`,
           displayName:
             payload.displayName ||
             (payload.email ? payload.email.split('@')[0] : payload.phoneNumber) ||
             'Player',
           avatarUrl: payload.avatarUrl,
         } as SocketUser;
+        client.data.userId = verifiedUserId;
+        client.data.isAuthenticated = true;
       } else {
-        // Fallback for tests or guest socket connections
-        const guestId = (client.handshake.query?.userId as string) || `guest-${client.id.slice(0, 6)}`;
-        const guestName = (client.handshake.query?.displayName as string) || `Guest ${client.id.slice(0, 4)}`;
-        client.data.user = {
-          id: guestId,
-          email: `${guestId}@trix.local`,
-          displayName: guestName,
-        } as SocketUser;
+        // Fallback for tests or guest socket connections (Issue BE-5 Security Guard)
+        let guestId = client.handshake.query?.userId as string;
+        if (!guestId || (!guestId.startsWith('guest-') && process.env.NODE_ENV === 'production')) {
+          guestId = client.data?.user?.id || `guest-${client.id.slice(0, 6)}`;
+        }
+        const guestName =
+          (client.handshake.query?.displayName as string) ||
+          client.data?.user?.displayName ||
+          `Guest ${client.id.slice(0, 4)}`;
+        if (!client.data.user) {
+          client.data.user = {
+            id: guestId,
+            email: `${guestId}@trix.local`,
+            displayName: guestName,
+          } as SocketUser;
+        }
+        client.data.userId = client.data.user.id;
+        client.data.isAuthenticated = false;
       }
 
       this.logger.log(`Socket connected: ${client.id} [User: ${client.data.user.displayName}]`);
     } catch (err: any) {
       this.logger.warn(`Auth handshake failed for socket ${client.id}: ${err.message}`);
       // Assign fallback guest rather than dropping immediately
-      const guestId = `guest-${client.id.slice(0, 6)}`;
-      client.data.user = {
+      const guestId = client.data?.user?.id || `guest-${client.id.slice(0, 6)}`;
+      client.data.user = client.data?.user || ({
         id: guestId,
         email: `${guestId}@trix.local`,
         displayName: `Guest ${client.id.slice(0, 4)}`,
-      } as SocketUser;
+      } as SocketUser);
+      client.data.userId = client.data.user.id;
+      client.data.isAuthenticated = false;
     }
   }
 
@@ -319,10 +382,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
   }
 
   private getUserFromSocket(client: Socket): SocketUser {
-    return client.data?.user || {
-      id: client.id,
-      email: `${client.id}@trix.local`,
-      displayName: `Player ${client.id.slice(0, 4)}`,
+    if (client.data?.user) {
+      if (client.data?.userId) {
+        client.data.user.id = client.data.userId;
+      }
+      return client.data.user;
+    }
+    const fallbackId = `guest-${client.id.slice(0, 6)}`;
+    return {
+      id: fallbackId,
+      email: `${fallbackId}@trix.local`,
+      displayName: `Guest ${client.id.slice(0, 4)}`,
     };
   }
 
@@ -663,6 +733,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       });
 
       this.server.to(client.id).emit('game_state', snapshot);
+
+      // BE-2: Ensure pending bot kingdom selection is active and deadline is non-null
+      if (state.currentPhase === 'KINGDOM_SELECTION') {
+        const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
+        if (room.players[ownerSeat]?.isBot) {
+          this.getBotActionService()?.handleKingdomSelection(room.roomId, ownerSeat);
+        }
+        if (!room.turnDeadlineTimestamp) {
+          this.startRoomTurnTimer(room);
+        }
+      }
     }
 
     return {
@@ -1470,7 +1551,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     });
 
     if (state.currentPhase === 'GAME_OVER') {
-      this.botActionService?.cancelPendingActions(room.roomId);
+      this.getBotActionService()?.cancelPendingActions(room.roomId);
 
       this.server.to(room.roomId).emit('game_over', {
         roomId: room.roomId,
@@ -1487,6 +1568,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       this.roomTimerService.stopTimer(room.roomId);
     } else {
       this.startRoomTurnTimer(room);
+      this.broadcastMaskedState(room.roomId);
     }
   }
 
@@ -1548,18 +1630,25 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
     );
 
     // Trigger AI automation for any active bot seat
-    if (state.currentPhase === 'KINGDOM_SELECTION') {
-      const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
-      if (room.players[ownerSeat]?.isBot) {
-        this.botActionService?.handleBotTurn(room.roomId, ownerSeat);
+    const botAction = this.getBotActionService();
+    if (botAction) {
+      if (state.currentPhase === 'KINGDOM_SELECTION') {
+        const ownerSeat = room.engine.getActiveKingdom().ownerSeat;
+        if (room.players[ownerSeat]?.isBot) {
+          if (typeof botAction.handleKingdomSelection === 'function') {
+            botAction.handleKingdomSelection(room.roomId, ownerSeat);
+          } else if (typeof botAction.handleBotTurn === 'function') {
+            botAction.handleBotTurn(room.roomId, ownerSeat);
+          }
+        }
+      } else if (state.currentPhase === 'TRICK_PLAY' || state.currentPhase === 'TRIX_PLAY') {
+        const turnSeat = state.currentTurnSeat;
+        if (room.players[turnSeat]?.isBot && typeof botAction.handleBotTurn === 'function') {
+          botAction.handleBotTurn(room.roomId, turnSeat);
+        }
+      } else if (typeof botAction.evaluateAndTrigger === 'function') {
+        botAction.evaluateAndTrigger(room);
       }
-    } else if (state.currentPhase === 'TRICK_PLAY' || state.currentPhase === 'TRIX_PLAY') {
-      const turnSeat = state.currentTurnSeat;
-      if (room.players[turnSeat]?.isBot) {
-        this.botActionService?.handleBotTurn(room.roomId, turnSeat);
-      }
-    } else {
-      this.botActionService?.evaluateAndTrigger(room);
     }
   }
 }

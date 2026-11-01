@@ -1,6 +1,7 @@
-import { forwardRef, Inject, Injectable, Logger } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { GameRoomService, ActiveGameRoom } from '../game-room/services/game-room.service.js';
-import type { GameGateway } from '../game-room/game.gateway.js';
+import { GameGateway } from '../game-room/game.gateway.js';
 import { BotPersona, getRandomBotPersonas } from './bot-persona.data.js';
 
 export interface BackfillOptions {
@@ -18,6 +19,8 @@ export class BotFillService {
   constructor(
     @Inject(forwardRef(() => GameRoomService))
     private readonly gameRoomService: GameRoomService,
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {
     if (this.gameRoomService && typeof this.gameRoomService.onRoomCreated === 'function') {
       this.gameRoomService.onRoomCreated((room: ActiveGameRoom) => {
@@ -48,7 +51,19 @@ export class BotFillService {
   }
 
   public getGateway(): GameGateway | undefined {
-    return this.gateway;
+    if (this.gateway) return this.gateway;
+    if (this.moduleRef) {
+      try {
+        const gw = this.moduleRef.get(GameGateway, { strict: false });
+        if (gw) {
+          this.gateway = gw;
+          return gw;
+        }
+      } catch (err: any) {
+        this.logger.debug(`Could not resolve GameGateway via moduleRef: ${err.message}`);
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -212,12 +227,13 @@ export class BotFillService {
     );
 
     // Broadcast WebSocket events if Gateway is connected
-    if (this.gateway) {
-      if (typeof (this.gateway as any).broadcastLobbyJoinSequence === 'function') {
-        (this.gateway as any).broadcastLobbyJoinSequence(room, result.seat, botUser, result.matchStarted);
-      } else if (this.gateway.server) {
+    const gateway = this.getGateway();
+    if (gateway) {
+      if (typeof (gateway as any).broadcastLobbyJoinSequence === 'function') {
+        (gateway as any).broadcastLobbyJoinSequence(room, result.seat, botUser, result.matchStarted);
+      } else if (gateway.server) {
         // Fallback for mocked gateway in unit tests
-        this.gateway.server.to(room.roomId).emit('player_joined', {
+        gateway.server.to(room.roomId).emit('player_joined', {
           roomId: room.roomId,
           seat: result.seat,
           roomSequence: ++room.roomSequence,
@@ -231,7 +247,7 @@ export class BotFillService {
           },
         });
 
-        this.gateway.server.to(room.roomId).emit('room_updated', {
+        gateway.server.to(room.roomId).emit('room_updated', {
           roomId: room.roomId,
           roomSequence: ++room.roomSequence,
           players: room.players
@@ -250,7 +266,7 @@ export class BotFillService {
         if (result.matchStarted) {
           const ownerSeat = room.engine ? room.engine.getActiveKingdom().ownerSeat : 0;
           const currentTurn = room.engine ? room.engine.getState().currentTurnSeat : 0;
-          this.gateway.server.to(room.roomId).emit('match_started', {
+          gateway.server.to(room.roomId).emit('match_started', {
             roomId: room.roomId,
             gameMode: room.gameMode,
             kingdomType: room.kingdomType,
@@ -261,10 +277,14 @@ export class BotFillService {
             roomSequence: ++room.roomSequence,
           });
 
-          this.gateway.startRoomTurnTimer(room);
-          this.gateway.broadcastMaskedState(room.roomId);
+          gateway.startRoomTurnTimer(room);
+          gateway.broadcastMaskedState(room.roomId);
         }
       }
+    } else {
+      this.logger.warn(
+        `[BOT_FILL] Room ${room.roomId}: GameGateway not resolved; bot join sequence was not broadcast.`,
+      );
     }
 
     return { seat: result.seat, matchStarted: result.matchStarted };

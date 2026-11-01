@@ -1,4 +1,4 @@
-import { Card, Suit } from './types/card.types.js';
+import { Card, RANK_POWERS, Suit } from './types/card.types.js';
 import {
   ALL_CONTRACTS,
   ContractType,
@@ -267,8 +267,10 @@ export class TrixEngine {
     const isDoubled = this.state.doubledCards.find(
       (dc) => dc.suit === card.suit && dc.rank === card.rank,
     );
+    const authoritativeCard = hand.find((c) => c.suit === card.suit && c.rank === card.rank) || card;
     const cardToPlay: Card = {
-      ...card,
+      ...authoritativeCard,
+      power: RANK_POWERS[card.rank] ?? card.power,
       isDoubled: !!isDoubled,
       doubledBySeat: isDoubled?.doubledBySeat,
     };
