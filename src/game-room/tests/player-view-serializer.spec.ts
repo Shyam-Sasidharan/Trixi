@@ -88,4 +88,16 @@ describe('PlayerViewSerializer (Anti-Cheat Zero-Trust)', () => {
     expect(() => PlayerViewSerializer.serialize(state, 4, 'room-err')).toThrow('Invalid targetSeat: 4');
     expect(() => PlayerViewSerializer.serialize(state, -1, 'room-err')).toThrow('Invalid targetSeat: -1');
   });
+
+  it('should include strictly typed currentPhase, currentTurnSeat, and mySeat as numbers', () => {
+    const state = engine.getState();
+    const serialized = PlayerViewSerializer.serialize(state, 2, 'room-types');
+
+    expect(serialized.currentPhase).toBe('KINGDOM_SELECTION');
+    expect(serialized.gamePhase).toBe('KINGDOM_SELECTION');
+    expect(typeof serialized.currentTurnSeat).toBe('number');
+    expect(typeof serialized.mySeat).toBe('number');
+    expect(typeof serialized.kingdomOwnerSeat).toBe('number');
+    expect(serialized.mySeat).toBe(2);
+  });
 });

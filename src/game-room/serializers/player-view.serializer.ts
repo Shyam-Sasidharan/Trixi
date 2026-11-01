@@ -40,6 +40,7 @@ export interface PlayerSeatInfo {
 export interface SanitizedPlayerGameState {
   roomId: string;
   gamePhase: GamePhase;
+  currentPhase: GamePhase; // Canonical alias for frontend state parsing
   kingdomIndex: number; // 1 to 4
   kingdomOwnerSeat: number;
   currentTurnSeat: number;
@@ -184,14 +185,15 @@ export class PlayerViewSerializer {
     return {
       roomId,
       gamePhase: matchState.currentPhase,
+      currentPhase: matchState.currentPhase,
       kingdomIndex: (matchState.currentKingdomIndex ?? 0) + 1,
-      kingdomOwnerSeat: kingdom ? kingdom.ownerSeat : 0,
-      currentTurnSeat: matchState.currentTurnSeat,
+      kingdomOwnerSeat: Number(kingdom ? kingdom.ownerSeat : 0),
+      currentTurnSeat: Number(matchState.currentTurnSeat),
       activeContracts: [...matchState.activeContracts],
       kingdomType: matchState.kingdomType,
       gameMode: matchState.gameMode,
       turnTimeLimit: options?.turnTimeLimit ?? 20,
-      mySeat: targetSeat,
+      mySeat: Number(targetSeat),
       myHand: sortedHand,
       opponents,
       doubledCardsOnTable,

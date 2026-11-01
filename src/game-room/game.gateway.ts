@@ -857,6 +857,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
           (tick) => {
             this.server.to(room.roomId).emit('timer_tick', {
               ...tick,
+              phase: 'DOUBLING_PHASE',
+              currentPhase: 'DOUBLING_PHASE',
+              currentTurnSeat: null,
+              seat: null,
               turnId: room.turnId,
               stateVersion: room.stateVersion,
               roomSequence: ++room.roomSequence,
@@ -1423,6 +1427,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
         (tick) => {
           this.server.to(room.roomId).emit('timer_tick', {
             ...tick,
+            phase: 'KINGDOM_SELECTION',
+            currentPhase: 'KINGDOM_SELECTION',
+            currentTurnSeat: Number(ownerSeat),
+            seat: Number(ownerSeat),
             turnId: room.turnId,
             stateVersion: room.stateVersion,
             roomSequence: ++room.roomSequence,
@@ -1452,6 +1460,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect, On
       (tick) => {
         this.server.to(room.roomId).emit('timer_tick', {
           ...tick,
+          phase: state.currentPhase,
+          currentPhase: state.currentPhase,
+          currentTurnSeat: Number(turnSeat),
+          seat: Number(turnSeat),
           turnId: room.turnId,
           stateVersion: room.stateVersion,
           roomSequence: ++room.roomSequence,
