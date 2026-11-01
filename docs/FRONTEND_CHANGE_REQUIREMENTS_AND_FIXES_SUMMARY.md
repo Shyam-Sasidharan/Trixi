@@ -210,3 +210,4 @@ sequenceDiagram
 - [ ] **Countdown Wheel:** Verify the 15-second kingdom selection timer ticks down smoothly on screen.
 - [ ] **Card Click Lock:** Ensure cards cannot be dragged or tapped during `KINGDOM_SELECTION` or `DOUBLING_PHASE`.
 - [ ] **Trick Clear Timing:** After 4 cards are played in a trick, verify the 4 cards remain visible on table for 1.5 seconds (`displayDurationMs: 1500`) before clearing.
+
